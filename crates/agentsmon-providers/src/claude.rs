@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use crossbeam_channel::{unbounded, Receiver};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
-use sysinfo::{Pid, ProcessesToUpdate, System};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 use crate::{focus, AgentProvider};
 
@@ -166,7 +166,13 @@ impl AgentProvider for ClaudeProvider {
 
     fn discover(&self) -> Result<Vec<AgentSnapshot>> {
         let mut system = System::new();
-        system.refresh_processes(ProcessesToUpdate::All, true);
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing()
+                .with_cmd(UpdateKind::OnlyIfNotSet)
+                .with_exe(UpdateKind::OnlyIfNotSet),
+        );
         let mut snapshots = Vec::new();
         for file in self.scan_files()? {
             let record = match Self::parse_file(&file) {

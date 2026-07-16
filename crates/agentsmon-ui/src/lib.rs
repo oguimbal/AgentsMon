@@ -1,5 +1,6 @@
 //! GPUI views for AgentsMon.
 
+use std::collections::HashSet;
 use std::f32::consts::PI;
 use std::sync::{Arc, OnceLock};
 
@@ -34,14 +35,20 @@ pub enum MonitorEvent {
 pub struct MonitorView {
     agents: Vec<AgentSnapshot>,
     providers: Vec<ProviderStatus>,
+    unread: HashSet<AgentId>,
     bar_drag_last_x: Option<gpui::Pixels>,
 }
 
 impl MonitorView {
-    pub fn new(agents: Vec<AgentSnapshot>, providers: Vec<ProviderStatus>) -> Self {
+    pub fn new(
+        agents: Vec<AgentSnapshot>,
+        providers: Vec<ProviderStatus>,
+        unread: HashSet<AgentId>,
+    ) -> Self {
         Self {
             agents,
             providers,
+            unread,
             bar_drag_last_x: None,
         }
     }
@@ -50,10 +57,12 @@ impl MonitorView {
         &mut self,
         agents: Vec<AgentSnapshot>,
         providers: Vec<ProviderStatus>,
+        unread: HashSet<AgentId>,
         cx: &mut Context<Self>,
     ) {
         self.agents = agents;
         self.providers = providers;
+        self.unread = unread;
         cx.notify();
     }
 
@@ -98,6 +107,7 @@ impl MonitorView {
         let drag_label = agent.project_name.clone();
         let context = agent.context_usage.map(|usage| usage.used_percentage());
         let hover_details = agent.clone();
+        let is_unread = self.unread.contains(&id);
 
         div()
             .id(SharedString::from(format!(
@@ -111,6 +121,7 @@ impl MonitorView {
             .px(px(5.0))
             .rounded_full()
             .bg(rgba(0x25262bf2))
+            .relative()
             .hover(|style| style.bg(rgb(0x303138)))
             .cursor_pointer()
             .on_mouse_move(|_, _, cx| cx.stop_propagation())
@@ -152,6 +163,17 @@ impl MonitorView {
                     }
                 },
             ))
+            .when(is_unread, |card| {
+                card.child(
+                    div()
+                        .absolute()
+                        .top(px(-1.0))
+                        .left(px(-1.0))
+                        .size(px(5.0))
+                        .rounded_full()
+                        .bg(rgb(0xf2b84b)),
+                )
+            })
             .child(
                 div()
                     .id(SharedString::from(format!("context-{}", id.session_id)))

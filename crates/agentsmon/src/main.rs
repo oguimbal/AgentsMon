@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -23,6 +24,8 @@ const DETAILS_WIDTH: f32 = 400.0;
 const DETAILS_HEIGHT: f32 = 176.0;
 const DETAILS_GAP: f32 = 6.0;
 
+mod notification;
+
 struct Panel {
     display_id: DisplayId,
     display_bounds: Bounds<Pixels>,
@@ -43,6 +46,8 @@ struct AppStateInner {
     panels: RefCell<Vec<Panel>>,
     x_offset: RefCell<f32>,
     details_window: RefCell<Option<AnyWindowHandle>>,
+    unread: RefCell<HashSet<agentsmon_core::AgentId>>,
+    notifications: notification::NativeNotifications,
 }
 
 fn main() {
@@ -75,6 +80,8 @@ fn main() {
             panels: RefCell::new(Vec::new()),
             x_offset: RefCell::new(0.0),
             details_window: RefCell::new(None),
+            unread: RefCell::new(HashSet::new()),
+            notifications: notification::NativeNotifications::new(),
         }));
 
         cx.on_action(|_: &Quit, cx| cx.quit());
@@ -202,14 +209,37 @@ fn refresh(state: &AppState, cx: &mut App) {
         }
     }
     snapshots.sort_by_key(|snapshot| snapshot.last_activity);
+    let previous: HashMap<_, _> = state
+        .0
+        .store
+        .borrow()
+        .visible()
+        .into_iter()
+        .map(|snapshot| (snapshot.id, snapshot.state))
+        .collect();
+    let completed: Vec<_> = snapshots
+        .iter()
+        .filter(|snapshot| {
+            previous.get(&snapshot.id) == Some(&agentsmon_core::AgentState::Active)
+                && snapshot.state != agentsmon_core::AgentState::Active
+        })
+        .cloned()
+        .collect();
     state.0.store.borrow_mut().apply_snapshot(snapshots);
     *state.0.provider_statuses.borrow_mut() = provider_statuses;
+    for snapshot in completed {
+        state.0.unread.borrow_mut().insert(snapshot.id.clone());
+        state.0.notifications.show(&snapshot);
+    }
     broadcast(state, cx);
 }
 
 fn spawn_refresh_loop(cx: &mut App, state: AppState) {
     let mut last_poll = Instant::now() - Duration::from_secs(3);
     cx.spawn(async move |cx: &mut AsyncApp| loop {
+        while let Some(id) = state.0.notifications.try_clicked() {
+            cx.update(|cx| focus_agent(&id, &state, cx));
+        }
         let should_close_details =
             state.0.details_window.borrow().is_some() && !pointer_is_over_native_panel();
         if should_close_details {
@@ -238,9 +268,10 @@ fn spawn_refresh_loop(cx: &mut App, state: AppState) {
 fn broadcast(state: &AppState, cx: &mut App) {
     let agents = state.0.store.borrow().visible();
     let providers = state.0.provider_statuses.borrow().clone();
+    let unread = state.0.unread.borrow().clone();
     for panel in state.0.panels.borrow().iter() {
         panel.view.update(cx, |view, cx| {
-            view.set_data(agents.clone(), providers.clone(), cx)
+            view.set_data(agents.clone(), providers.clone(), unread.clone(), cx)
         });
         let width = natural_width(&agents, &providers, panel.max_width);
         let _ = cx.update_window(panel.handle, |_, window, _| {
@@ -277,26 +308,7 @@ fn handle_event(
 ) {
     match event {
         MonitorEvent::Focus(id) => {
-            let target = state
-                .0
-                .store
-                .borrow()
-                .get(id)
-                .map(|snapshot| snapshot.focus_target.clone());
-            if let Some(target) = target {
-                let provider = state
-                    .0
-                    .providers
-                    .iter()
-                    .find(|provider| provider.id() == id.provider);
-                if let Some(provider) = provider {
-                    if let Err(error) = provider.focus(&target) {
-                        tracing::warn!(%error, session = %id.session_id, provider = %id.provider, "focus failed");
-                    }
-                } else {
-                    tracing::warn!(provider = %id.provider, "focus provider is unavailable");
-                }
-            }
+            focus_agent(id, state, cx);
         }
         MonitorEvent::Hide(id) => {
             state.0.store.borrow_mut().hide(id);
@@ -336,6 +348,32 @@ fn handle_event(
         }
         MonitorEvent::HideDetails => close_details(state, cx),
     }
+}
+
+fn focus_agent(id: &agentsmon_core::AgentId, state: &AppState, cx: &mut App) {
+    state.0.unread.borrow_mut().remove(id);
+    state.0.notifications.close(id);
+    let target = state
+        .0
+        .store
+        .borrow()
+        .get(id)
+        .map(|snapshot| snapshot.focus_target.clone());
+    if let Some(target) = target {
+        if let Some(provider) = state
+            .0
+            .providers
+            .iter()
+            .find(|provider| provider.id() == id.provider)
+        {
+            if let Err(error) = provider.focus(&target) {
+                tracing::warn!(%error, session = %id.session_id, provider = %id.provider, "focus failed");
+            }
+        } else {
+            tracing::warn!(provider = %id.provider, "focus provider is unavailable");
+        }
+    }
+    broadcast(state, cx);
 }
 
 fn close_details(state: &AppState, cx: &mut App) {
@@ -460,6 +498,7 @@ fn reconcile_displays(cx: &mut App, state: &AppState, force: bool) {
 
     let agents = state.0.store.borrow().visible();
     let providers = state.0.provider_statuses.borrow().clone();
+    let unread = state.0.unread.borrow().clone();
     for display in displays {
         let bounds = display.bounds();
         let max_width = (bounds.size.width.as_f32() - SCREEN_INSET * 2.0).max(76.0);
@@ -491,8 +530,9 @@ fn reconcile_displays(cx: &mut App, state: &AppState, force: bool) {
         let slot = view_slot.clone();
         let initial = agents.clone();
         let initial_providers = providers.clone();
+        let initial_unread = unread.clone();
         match cx.open_window(options, move |_, cx| {
-            let view = cx.new(|_| MonitorView::new(initial, initial_providers));
+            let view = cx.new(|_| MonitorView::new(initial, initial_providers, initial_unread));
             *slot.borrow_mut() = Some(view.clone());
             view
         }) {
