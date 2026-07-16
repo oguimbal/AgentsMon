@@ -205,9 +205,21 @@ impl AgentProvider for ClaudeProvider {
                 last_activity,
             });
         }
-        share_latest_provider_usage(&mut snapshots);
         snapshots.sort_by_key(|snapshot| snapshot.last_activity);
         Ok(snapshots)
+    }
+
+    fn usage(&self) -> Result<Option<ProviderUsage>> {
+        Ok(self
+            .scan_files()?
+            .into_iter()
+            .filter_map(|path| {
+                let record = Self::parse_file(&path).ok()?;
+                let usage = record.rate_limits.as_ref().and_then(provider_usage)?;
+                Some((record.last_activity(&path), usage))
+            })
+            .max_by_key(|(last_activity, _)| *last_activity)
+            .map(|(_, usage)| usage))
     }
 
     fn focus(&self, target: &FocusTarget) -> Result<()> {
@@ -229,24 +241,6 @@ impl AgentProvider for ClaudeProvider {
 
     fn runtime_root(&self) -> &Path {
         &self.root
-    }
-}
-
-fn share_latest_provider_usage(snapshots: &mut [AgentSnapshot]) {
-    let latest = snapshots
-        .iter()
-        .filter_map(|snapshot| {
-            snapshot
-                .provider_usage
-                .as_ref()
-                .map(|usage| (snapshot.last_activity, usage.clone()))
-        })
-        .max_by_key(|(last_activity, _)| *last_activity)
-        .map(|(_, usage)| usage);
-    if let Some(latest) = latest {
-        for snapshot in snapshots {
-            snapshot.provider_usage = Some(latest.clone());
-        }
     }
 }
 
@@ -429,6 +423,25 @@ mod tests {
         assert_eq!(usage.highest_used_percentage(), Some(74.0));
         assert_eq!(usage.limits[0].window_minutes, Some(300));
         assert_eq!(usage.limits[1].window_minutes, Some(10_080));
+    }
+
+    #[test]
+    fn exposes_the_latest_quota_without_a_live_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.path().join("project");
+        fs::create_dir(&project).unwrap();
+        fs::write(
+            project.join("stopped.cstatus"),
+            r#"{"session_id":"stopped","pid":999999,"state":"idle","timestamp":"2026-07-16T10:00:00Z","rate_limits":{"five_hour":{"used_percentage":37.0}}}"#,
+        )
+        .unwrap();
+
+        let provider = ClaudeProvider::with_root(directory.path().to_path_buf());
+        assert!(provider.discover().unwrap().is_empty());
+        assert_eq!(
+            provider.usage().unwrap().unwrap().highest_used_percentage(),
+            Some(37.0)
+        );
     }
 
     #[test]

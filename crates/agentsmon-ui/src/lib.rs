@@ -1,12 +1,14 @@
 //! GPUI views for AgentsMon.
 
 use std::f32::consts::PI;
+use std::sync::{Arc, OnceLock};
 
-use agentsmon_core::{AgentId, AgentSnapshot, AgentState};
+use agentsmon_core::{AgentId, AgentSnapshot, AgentState, ProviderStatus, ProviderUsage};
 use gpui::prelude::*;
 use gpui::{
-    canvas, div, point, px, rgb, rgba, Context, DragMoveEvent, EventEmitter, Hsla, IntoElement,
-    MouseButton, MouseDownEvent, PathBuilder, Render, SharedString, Window,
+    canvas, div, img, point, px, rgb, rgba, Context, DragMoveEvent, EventEmitter, Hsla, Image,
+    ImageFormat, IntoElement, MouseButton, MouseDownEvent, PathBuilder, Render, SharedString,
+    Window,
 };
 
 #[derive(Debug, Clone)]
@@ -22,25 +24,70 @@ pub enum MonitorEvent {
         agent: Box<AgentSnapshot>,
         anchor_x: f32,
     },
+    ShowProviderDetails {
+        provider: Box<ProviderStatus>,
+        anchor_x: f32,
+    },
     HideDetails,
 }
 
 pub struct MonitorView {
     agents: Vec<AgentSnapshot>,
+    providers: Vec<ProviderStatus>,
     bar_drag_last_x: Option<gpui::Pixels>,
 }
 
 impl MonitorView {
-    pub fn new(agents: Vec<AgentSnapshot>) -> Self {
+    pub fn new(agents: Vec<AgentSnapshot>, providers: Vec<ProviderStatus>) -> Self {
         Self {
             agents,
+            providers,
             bar_drag_last_x: None,
         }
     }
 
-    pub fn set_agents(&mut self, agents: Vec<AgentSnapshot>, cx: &mut Context<Self>) {
+    pub fn set_data(
+        &mut self,
+        agents: Vec<AgentSnapshot>,
+        providers: Vec<ProviderStatus>,
+        cx: &mut Context<Self>,
+    ) {
         self.agents = agents;
+        self.providers = providers;
         cx.notify();
+    }
+
+    fn render_provider(
+        &self,
+        provider: ProviderStatus,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let details = provider.clone();
+        let percentage = provider
+            .usage
+            .as_ref()
+            .and_then(ProviderUsage::highest_used_percentage);
+        div()
+            .id(SharedString::from(format!("provider-{}", provider.id)))
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(17.0))
+            .rounded_full()
+            .hover(|style| style.bg(rgb(0x303138)))
+            .on_mouse_move(|_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_hover(cx.listener(move |_, hovered: &bool, window, cx| {
+                if *hovered {
+                    cx.emit(MonitorEvent::ShowProviderDetails {
+                        provider: Box::new(details.clone()),
+                        anchor_x: window.mouse_position().x.as_f32(),
+                    });
+                } else {
+                    cx.emit(MonitorEvent::HideDetails);
+                }
+            }))
+            .child(provider_ring(provider.id, percentage))
     }
 
     fn render_card(&self, agent: AgentSnapshot, cx: &mut Context<Self>) -> impl IntoElement {
@@ -50,10 +97,6 @@ impl MonitorView {
         let live_target = id.clone();
         let drag_label = agent.project_name.clone();
         let context = agent.context_usage.map(|usage| usage.used_percentage());
-        let quota = agent
-            .provider_usage
-            .as_ref()
-            .and_then(|usage| usage.highest_used_percentage());
         let hover_details = agent.clone();
 
         div()
@@ -109,7 +152,6 @@ impl MonitorView {
                     }
                 },
             ))
-            .when_some(quota, |card, percentage| card.child(quota_bar(percentage)))
             .child(
                 div()
                     .id(SharedString::from(format!("context-{}", id.session_id)))
@@ -184,6 +226,17 @@ impl Render for MonitorView {
                     }
                 }
             }));
+
+        let root = root
+            .children(
+                self.providers
+                    .clone()
+                    .into_iter()
+                    .map(|provider| self.render_provider(provider, cx)),
+            )
+            .when(!self.providers.is_empty(), |root| {
+                root.child(div().w(px(1.0)).h(px(13.0)).bg(rgb(0x3b3d44)))
+            });
 
         if self.agents.is_empty() {
             root.child(
@@ -325,23 +378,79 @@ fn context_ring_color(percentage: f32) -> u32 {
     }
 }
 
-fn quota_bar(percentage: f32) -> impl IntoElement {
-    let progress = (percentage / 100.0).clamp(0.0, 1.0);
+fn provider_ring(provider: String, percentage: Option<f32>) -> impl IntoElement {
+    let logo = provider_logo(&provider);
+    let has_logo = logo.is_some();
     div()
-        .flex()
-        .flex_col()
-        .justify_end()
-        .w(px(3.0))
-        .h(px(12.0))
-        .rounded_full()
-        .overflow_hidden()
-        .bg(rgb(0x555861))
+        .relative()
+        .size(px(14.0))
         .child(
-            div()
-                .w_full()
-                .h(px(12.0 * progress))
-                .bg(rgb(context_ring_color(percentage))),
+            canvas(
+                |_, _, _| {},
+                move |bounds, _, window, _| {
+                    let center = point(
+                        bounds.origin.x + bounds.size.width / 2.0,
+                        bounds.origin.y + bounds.size.height / 2.0,
+                    );
+                    let radius = px(5.5);
+                    draw_circle(window, center, radius, px(1.0), rgb(0x555861).into());
+                    if let Some(progress) = ring_progress(percentage) {
+                        draw_arc(
+                            window,
+                            center,
+                            radius,
+                            px(1.0),
+                            progress,
+                            rgb(context_ring_color(percentage.unwrap_or_default())).into(),
+                        );
+                    }
+                    if !has_logo {
+                        draw_circle(window, center, px(2.2), px(1.0), rgb(0xd5d6da).into());
+                    }
+                },
+            )
+            .absolute()
+            .top(px(0.0))
+            .left(px(0.0))
+            .size(px(14.0)),
         )
+        .when_some(logo, |ring, logo| {
+            ring.child(
+                img(logo)
+                    .absolute()
+                    .top(px(3.5))
+                    .left(px(3.5))
+                    .size(px(7.0)),
+            )
+        })
+}
+
+fn provider_logo(provider: &str) -> Option<Arc<Image>> {
+    static OPENAI: OnceLock<Arc<Image>> = OnceLock::new();
+    static CLAUDE: OnceLock<Arc<Image>> = OnceLock::new();
+    match provider {
+        "codex" => Some(
+            OPENAI
+                .get_or_init(|| {
+                    Arc::new(Image::from_bytes(
+                        ImageFormat::Png,
+                        include_bytes!("../assets/openai-16.png").to_vec(),
+                    ))
+                })
+                .clone(),
+        ),
+        "claude" => Some(
+            CLAUDE
+                .get_or_init(|| {
+                    Arc::new(Image::from_bytes(
+                        ImageFormat::Png,
+                        include_bytes!("../assets/claude-16.png").to_vec(),
+                    ))
+                })
+                .clone(),
+        ),
+        _ => None,
+    }
 }
 
 fn format_percentage(value: f32) -> String {
@@ -422,6 +531,62 @@ impl AgentDetailsView {
     }
 }
 
+pub struct ProviderDetailsView(ProviderStatus);
+
+impl ProviderDetailsView {
+    pub fn new(provider: ProviderStatus) -> Self {
+        Self(provider)
+    }
+}
+
+impl Render for ProviderDetailsView {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let provider = &self.0;
+        let mut rows = Vec::new();
+        if let Some(usage) = &provider.usage {
+            if let Some(plan) = &usage.plan {
+                rows.push(("Offre".to_string(), plan.clone()));
+            }
+            rows.extend(usage_rows(usage));
+        } else {
+            rows.push(("Quota".into(), "Indisponible".into()));
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(5.0))
+            .size_full()
+            .px(px(9.0))
+            .py(px(7.0))
+            .rounded_md()
+            .bg(rgb(0x111216))
+            .text_size(px(11.0))
+            .text_color(rgb(0xf4f4f5))
+            .child(
+                div()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child(provider_label(&provider.id).to_string()),
+            )
+            .child(
+                div()
+                    .text_color(rgb(0xb9bbc3))
+                    .child("Utilisation du provider"),
+            )
+            .children(rows.into_iter().map(|(label, value)| {
+                div()
+                    .flex()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .min_w(px(108.0))
+                            .text_color(rgb(0x8f929c))
+                            .child(label),
+                    )
+                    .child(div().child(value))
+            }))
+    }
+}
+
 impl Render for AgentDetailsView {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let agent = &self.0;
@@ -445,16 +610,7 @@ impl Render for AgentDetailsView {
             if let Some(plan) = &usage.plan {
                 rows.push(("Offre".into(), plan.clone()));
             }
-            for limit in &usage.limits {
-                let mut value = format!("{} %", format_percentage(limit.used_percentage()));
-                if let Some(minutes) = limit.window_minutes {
-                    value.push_str(&format!(" sur {}", format_window(minutes)));
-                }
-                if let Some(reset) = limit.resets_at {
-                    value.push_str(&format!(" · reset {}", format_reset(reset)));
-                }
-                rows.push((limit.label.clone(), value));
-            }
+            rows.extend(usage_rows(usage));
         } else {
             rows.push(("Quota".into(), "Indisponible".into()));
         }
@@ -489,6 +645,23 @@ impl Render for AgentDetailsView {
                     .child(div().child(value))
             }))
     }
+}
+
+fn usage_rows(usage: &ProviderUsage) -> Vec<(String, String)> {
+    usage
+        .limits
+        .iter()
+        .map(|limit| {
+            let mut value = format!("{} %", format_percentage(limit.used_percentage()));
+            if let Some(minutes) = limit.window_minutes {
+                value.push_str(&format!(" sur {}", format_window(minutes)));
+            }
+            if let Some(reset) = limit.resets_at {
+                value.push_str(&format!(" · reset {}", format_reset(reset)));
+            }
+            (limit.label.clone(), value)
+        })
+        .collect()
 }
 
 fn provider_label(provider: &str) -> &str {
@@ -566,26 +739,22 @@ impl Render for DragPreview {
     }
 }
 
-pub fn natural_width(agents: &[AgentSnapshot], max_width: f32) -> f32 {
-    if agents.is_empty() {
-        return 76.0;
-    }
+pub fn natural_width(
+    agents: &[AgentSnapshot],
+    providers: &[ProviderStatus],
+    max_width: f32,
+) -> f32 {
     // Root padding + the trailing drop target, then one gap per card (including
     // the gap before that target). Keeping these outside the per-card estimate
     // prevents the last close button from being clipped.
-    let chrome = 14.0 + agents.len() as f32 * 3.0;
+    let provider_width = providers.len() as f32 * 20.0 + f32::from(!providers.is_empty()) * 4.0;
+    let chrome = 14.0 + agents.len() as f32 * 3.0 + provider_width;
     let content = chrome
         + agents
             .iter()
-            .map(|agent| {
-                let quota_width = if agent.provider_usage.is_some() {
-                    6.0
-                } else {
-                    0.0
-                };
-                42.0 + quota_width + agent.project_name.chars().count().min(27) as f32 * 5.5
-            })
-            .sum::<f32>();
+            .map(|agent| 42.0 + agent.project_name.chars().count().min(27) as f32 * 5.5)
+            .sum::<f32>()
+        + if agents.is_empty() { 55.0 } else { 0.0 };
     content.clamp(76.0, max_width.max(76.0))
 }
 
@@ -828,7 +997,7 @@ mod tests {
 
     #[test]
     fn empty_and_overflow_widths_are_bounded() {
-        assert_eq!(natural_width(&[], 900.0), 76.0);
+        assert_eq!(natural_width(&[], &[], 900.0), 76.0);
         let mut snapshot = AgentSnapshot {
             id: AgentId::new("claude", "s"),
             pid: 1,
@@ -840,9 +1009,12 @@ mod tests {
             focus_target: Default::default(),
             last_activity: std::time::SystemTime::UNIX_EPOCH,
         };
-        assert_eq!(natural_width(&vec![snapshot.clone(); 20], 500.0), 500.0);
+        assert_eq!(
+            natural_width(&vec![snapshot.clone(); 20], &[], 500.0),
+            500.0
+        );
         snapshot.project_name = "a".into();
-        assert!(natural_width(&[snapshot], 500.0) >= 76.0);
+        assert!(natural_width(&[snapshot], &[], 500.0) >= 76.0);
     }
 
     #[test]

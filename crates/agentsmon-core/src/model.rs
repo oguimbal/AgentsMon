@@ -78,6 +78,21 @@ pub struct ProviderUsage {
     pub plan: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderStatus {
+    pub id: String,
+    pub usage: Option<ProviderUsage>,
+}
+
+impl ProviderStatus {
+    pub fn new(id: impl Into<String>, usage: Option<ProviderUsage>) -> Self {
+        Self {
+            id: id.into(),
+            usage,
+        }
+    }
+}
+
 impl ProviderUsage {
     pub fn highest_used_percentage(&self) -> Option<f32> {
         self.limits

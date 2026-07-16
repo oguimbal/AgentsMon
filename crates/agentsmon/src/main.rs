@@ -3,9 +3,11 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use agentsmon_core::AgentStore;
+use agentsmon_core::{AgentStore, ProviderStatus};
 use agentsmon_providers::{AgentProvider, ClaudeProvider, CodexProvider, ProviderWatcher};
-use agentsmon_ui::{natural_width, AgentDetailsView, MonitorEvent, MonitorView};
+use agentsmon_ui::{
+    natural_width, AgentDetailsView, MonitorEvent, MonitorView, ProviderDetailsView,
+};
 use gpui::{
     actions, point, px, size, AnyWindowHandle, App, AppContext, AsyncApp, Bounds, DisplayId,
     Entity, Menu, MenuItem, Pixels, Subscription, WindowBackgroundAppearance, WindowBounds,
@@ -35,6 +37,7 @@ struct AppState(Rc<AppStateInner>);
 
 struct AppStateInner {
     store: RefCell<AgentStore>,
+    provider_statuses: RefCell<Vec<ProviderStatus>>,
     providers: Vec<Arc<dyn AgentProvider>>,
     watchers: RefCell<Vec<ProviderWatcher>>,
     panels: RefCell<Vec<Panel>>,
@@ -66,6 +69,7 @@ fn main() {
             .collect();
         let state = AppState(Rc::new(AppStateInner {
             store: RefCell::new(AgentStore::default()),
+            provider_statuses: RefCell::new(Vec::new()),
             providers,
             watchers: RefCell::new(watchers),
             panels: RefCell::new(Vec::new()),
@@ -175,9 +179,23 @@ fn open_codex_approval(cx: &mut App) {
 
 fn refresh(state: &AppState, cx: &mut App) {
     let mut snapshots = Vec::new();
+    let mut provider_statuses = Vec::new();
     for provider in &state.0.providers {
+        let usage = match provider.usage() {
+            Ok(usage) => usage,
+            Err(error) => {
+                tracing::warn!(provider = provider.id(), %error, "provider usage discovery failed");
+                None
+            }
+        };
+        provider_statuses.push(ProviderStatus::new(provider.id(), usage.clone()));
         match provider.discover() {
-            Ok(mut provider_snapshots) => snapshots.append(&mut provider_snapshots),
+            Ok(mut provider_snapshots) => {
+                for snapshot in &mut provider_snapshots {
+                    snapshot.provider_usage = usage.clone();
+                }
+                snapshots.append(&mut provider_snapshots)
+            }
             Err(error) => {
                 tracing::warn!(provider = provider.id(), %error, "agent discovery failed")
             }
@@ -185,6 +203,7 @@ fn refresh(state: &AppState, cx: &mut App) {
     }
     snapshots.sort_by_key(|snapshot| snapshot.last_activity);
     state.0.store.borrow_mut().apply_snapshot(snapshots);
+    *state.0.provider_statuses.borrow_mut() = provider_statuses;
     broadcast(state, cx);
 }
 
@@ -218,11 +237,12 @@ fn spawn_refresh_loop(cx: &mut App, state: AppState) {
 
 fn broadcast(state: &AppState, cx: &mut App) {
     let agents = state.0.store.borrow().visible();
+    let providers = state.0.provider_statuses.borrow().clone();
     for panel in state.0.panels.borrow().iter() {
-        panel
-            .view
-            .update(cx, |view, cx| view.set_agents(agents.clone(), cx));
-        let width = natural_width(&agents, panel.max_width);
+        panel.view.update(cx, |view, cx| {
+            view.set_data(agents.clone(), providers.clone(), cx)
+        });
+        let width = natural_width(&agents, &providers, panel.max_width);
         let _ = cx.update_window(panel.handle, |_, window, _| {
             window.resize(size(px(width), px(BAR_HEIGHT)));
         });
@@ -234,13 +254,15 @@ fn broadcast(state: &AppState, cx: &mut App) {
 }
 
 fn maximum_x_offset(state: &AppState, agents: &[agentsmon_core::AgentSnapshot]) -> f32 {
+    let providers = state.0.provider_statuses.borrow();
     state
         .0
         .panels
         .borrow()
         .iter()
         .map(|panel| {
-            panel.display_bounds.size.width.as_f32() - natural_width(agents, panel.max_width)
+            panel.display_bounds.size.width.as_f32()
+                - natural_width(agents, &providers, panel.max_width)
         })
         .fold(f32::INFINITY, f32::min)
         .max(0.0)
@@ -302,6 +324,16 @@ fn handle_event(
                 cx,
             );
         }
+        MonitorEvent::ShowProviderDetails { provider, anchor_x } => {
+            open_provider_details(
+                state,
+                display_id,
+                display_bounds,
+                *anchor_x,
+                provider.as_ref().clone(),
+                cx,
+            );
+        }
         MonitorEvent::HideDetails => close_details(state, cx),
     }
 }
@@ -358,6 +390,52 @@ fn open_details(
     }
 }
 
+fn open_provider_details(
+    state: &AppState,
+    display_id: DisplayId,
+    display_bounds: Bounds<Pixels>,
+    anchor_x: f32,
+    provider: ProviderStatus,
+    cx: &mut App,
+) {
+    close_details(state, cx);
+    let panel_x = display_bounds.origin.x.as_f32() + *state.0.x_offset.borrow();
+    let min_x = display_bounds.origin.x.as_f32() + 6.0;
+    let max_x =
+        (display_bounds.origin.x + display_bounds.size.width).as_f32() - DETAILS_WIDTH - 6.0;
+    let x = (panel_x + anchor_x - DETAILS_WIDTH / 2.0).clamp(min_x, max_x.max(min_x));
+    let y = (display_bounds.origin.y + display_bounds.size.height).as_f32()
+        - BAR_HEIGHT
+        - DETAILS_GAP
+        - DETAILS_HEIGHT;
+    let options = WindowOptions {
+        titlebar: None,
+        window_bounds: Some(WindowBounds::Windowed(Bounds {
+            origin: point(px(x), px(y)),
+            size: size(px(DETAILS_WIDTH), px(DETAILS_HEIGHT)),
+        })),
+        kind: WindowKind::PopUp,
+        is_movable: false,
+        is_resizable: false,
+        is_minimizable: false,
+        focus: false,
+        show: true,
+        display_id: Some(display_id),
+        window_background: WindowBackgroundAppearance::Transparent,
+        app_id: Some("com.oliv.AgentsMon.provider-details".into()),
+        ..Default::default()
+    };
+    match cx.open_window(options, move |_, cx| {
+        cx.new(|_| ProviderDetailsView::new(provider))
+    }) {
+        Ok(handle) => {
+            *state.0.details_window.borrow_mut() = Some(handle.into());
+            configure_native_details();
+        }
+        Err(error) => tracing::warn!(%error, "cannot open provider details"),
+    }
+}
+
 fn reconcile_displays(cx: &mut App, state: &AppState, force: bool) {
     let displays = cx.displays();
     let current: Vec<_> = state
@@ -381,10 +459,11 @@ fn reconcile_displays(cx: &mut App, state: &AppState, force: bool) {
     }
 
     let agents = state.0.store.borrow().visible();
+    let providers = state.0.provider_statuses.borrow().clone();
     for display in displays {
         let bounds = display.bounds();
         let max_width = (bounds.size.width.as_f32() - SCREEN_INSET * 2.0).max(76.0);
-        let width = natural_width(&agents, max_width);
+        let width = natural_width(&agents, &providers, max_width);
         let x_offset = (*state.0.x_offset.borrow()).clamp(0.0, (max_width - width).max(0.0));
         let window_bounds = Bounds {
             origin: point(
@@ -411,8 +490,9 @@ fn reconcile_displays(cx: &mut App, state: &AppState, force: bool) {
         let view_slot: Rc<RefCell<Option<Entity<MonitorView>>>> = Rc::new(RefCell::new(None));
         let slot = view_slot.clone();
         let initial = agents.clone();
+        let initial_providers = providers.clone();
         match cx.open_window(options, move |_, cx| {
-            let view = cx.new(|_| MonitorView::new(initial));
+            let view = cx.new(|_| MonitorView::new(initial, initial_providers));
             *slot.borrow_mut() = Some(view.clone());
             view
         }) {
