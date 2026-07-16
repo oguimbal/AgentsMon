@@ -1,0 +1,13 @@
+{
+  "name": "agentsmon-local",
+  "description": "Local Claude Code integration shipped with AgentsMon",
+  "owner": { "name": "AgentsMon" },
+  "plugins": [
+    {
+      "name": "agentsmon",
+      "description": "Claude Code session monitoring for AgentsMon",
+      "version": "0.1.0",
+      "source": "./claude-plugin"
+    }
+  ]
+}

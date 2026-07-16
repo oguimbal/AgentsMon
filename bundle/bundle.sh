@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+APP="$ROOT/dist/AgentsMon.app"
+
+cd "$ROOT"
+RUSTC="$(rustup which --toolchain stable rustc)" \
+RUSTDOC="$(rustup which --toolchain stable rustdoc)" \
+  rustup run stable cargo build --release -p agentsmon -p agentsmon-helper
+
+rm -rf "$APP"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/bin" "$APP/Contents/Resources/codex-plugin/bin"
+cp target/release/agentsmon "$APP/Contents/MacOS/agentsmon"
+cp target/release/agentsmon-helper "$APP/Contents/Resources/bin/agentsmon-helper"
+cp -R plugins/agentsmon-codex/. "$APP/Contents/Resources/codex-plugin/"
+cp target/release/agentsmon-helper "$APP/Contents/Resources/codex-plugin/bin/agentsmon-helper"
+cp bundle/Info.plist "$APP/Contents/Info.plist"
+chmod +x "$APP/Contents/MacOS/agentsmon" "$APP/Contents/Resources/bin/agentsmon-helper" "$APP/Contents/Resources/codex-plugin/bin/agentsmon-helper"
+
+if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
+  codesign --force --deep --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP"
+else
+  codesign --force --deep --sign - "$APP"
+fi
+
+echo "$APP"

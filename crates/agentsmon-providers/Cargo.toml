@@ -1,0 +1,33 @@
+[package]
+name = "agentsmon-providers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+agentsmon-core = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+directories = { workspace = true }
+notify = { workspace = true }
+crossbeam-channel = { workspace = true }
+sysinfo = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSRunningApplication"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tempfile = "3"

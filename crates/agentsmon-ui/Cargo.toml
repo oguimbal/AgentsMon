@@ -1,0 +1,11 @@
+[package]
+name = "agentsmon-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+agentsmon-core = { workspace = true }
+gpui = { workspace = true }
+

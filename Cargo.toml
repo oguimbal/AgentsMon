@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/agentsmon",
+    "crates/agentsmon-core",
+    "crates/agentsmon-providers",
+    "crates/agentsmon-ui",
+    "crates/agentsmon-helper",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+authors = ["Olivier Guimbal"]
+license = "BSD-3-Clause"
+repository = "https://github.com/oliv/agentsmon"
+
+[workspace.dependencies]
+agentsmon-core = { path = "crates/agentsmon-core" }
+agentsmon-providers = { path = "crates/agentsmon-providers" }
+agentsmon-ui = { path = "crates/agentsmon-ui" }
+
+gpui = { git = "https://github.com/zed-industries/zed", rev = "3767d69d6470f028411cfb75d25adbe5548ff9ca" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "3767d69d6470f028411cfb75d25adbe5548ff9ca", features = ["runtime_shaders", "font-kit"] }
+
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+directories = "6"
+notify = "8"
+crossbeam-channel = "0.5"
+sysinfo = "0.33"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+fs2 = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

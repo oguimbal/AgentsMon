@@ -1,0 +1,8 @@
+{
+  "name": "agentsmon",
+  "version": "0.1.0",
+  "description": "Publishes Claude Code session metadata to the local AgentsMon desktop app",
+  "author": { "name": "Olivier Guimbal" },
+  "license": "BSD-3-Clause"
+}
+

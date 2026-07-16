@@ -1,0 +1,12 @@
+{
+  "hooks": {
+    "SessionStart": [{ "hooks": [{ "type": "command", "command": "\"${PLUGIN_ROOT}/bin/agentsmon-helper\" codex-hook", "timeout": 5 }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "\"${PLUGIN_ROOT}/bin/agentsmon-helper\" codex-hook", "timeout": 5 }] }],
+    "PreToolUse": [{ "hooks": [{ "type": "command", "command": "\"${PLUGIN_ROOT}/bin/agentsmon-helper\" codex-hook", "timeout": 5 }] }],
+    "PostToolUse": [{ "hooks": [{ "type": "command", "command": "\"${PLUGIN_ROOT}/bin/agentsmon-helper\" codex-hook", "timeout": 5 }] }],
+    "PermissionRequest": [{ "hooks": [{ "type": "command", "command": "\"${PLUGIN_ROOT}/bin/agentsmon-helper\" codex-hook", "timeout": 5 }] }],
+    "PreCompact": [{ "hooks": [{ "type": "command", "command": "\"${PLUGIN_ROOT}/bin/agentsmon-helper\" codex-hook", "timeout": 5 }] }],
+    "PostCompact": [{ "hooks": [{ "type": "command", "command": "\"${PLUGIN_ROOT}/bin/agentsmon-helper\" codex-hook", "timeout": 5 }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "\"${PLUGIN_ROOT}/bin/agentsmon-helper\" codex-hook", "timeout": 5 }] }]
+  }
+}

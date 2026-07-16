@@ -1,0 +1,36 @@
+[package]
+name = "agentsmon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "agentsmon"
+path = "src/main.rs"
+
+[dependencies]
+agentsmon-core = { workspace = true }
+agentsmon-providers = { workspace = true }
+agentsmon-ui = { workspace = true }
+gpui = { workspace = true }
+gpui_platform = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+directories = { workspace = true }
+serde_json = { workspace = true }
+crossbeam-channel = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSEvent", "NSScreen", "NSWindow"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }

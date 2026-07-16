@@ -1,0 +1,30 @@
+{
+  "name": "agentsmon-codex",
+  "version": "0.1.0",
+  "description": "Publishes Codex session state and context metrics to the local AgentsMon app.",
+  "author": {
+    "name": "Olivier Guimbal",
+    "url": "https://github.com/oliv"
+  },
+  "homepage": "https://github.com/oliv/agentsmon",
+  "repository": "https://github.com/oliv/agentsmon",
+  "license": "BSD-3-Clause",
+  "keywords": [
+    "monitoring",
+    "codex"
+  ],
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "AgentsMon for Codex",
+    "shortDescription": "Local Codex session monitoring",
+    "longDescription": "Shows local Codex session state and context usage in AgentsMon without storing conversation content.",
+    "developerName": "Olivier Guimbal",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Lifecycle hooks",
+      "Local metadata"
+    ],
+    "websiteURL": "https://github.com/oliv/agentsmon",
+    "brandColor": "#34A853"
+  }
+}
