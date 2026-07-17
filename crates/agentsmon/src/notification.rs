@@ -14,6 +14,7 @@ pub struct NativeNotifications {
 impl NativeNotifications {
     pub fn new() -> Self {
         let (clicked_tx, clicked_rx) = crossbeam_channel::unbounded();
+        request_authorization();
         Self {
             clicked_tx,
             clicked_rx,
@@ -64,6 +65,18 @@ impl NativeNotifications {
         close_native(notification_id);
     }
 }
+
+#[cfg(target_os = "macos")]
+fn request_authorization() {
+    match mac_usernotifications::blocking::request_auth() {
+        Ok(true) => {}
+        Ok(false) => tracing::warn!("native notifications are disabled in macOS settings"),
+        Err(error) => tracing::warn!(%error, "cannot request native notification permission"),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn request_authorization() {}
 
 #[cfg(target_os = "macos")]
 fn close_native(id: NotificationId) {

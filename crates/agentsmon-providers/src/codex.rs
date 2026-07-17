@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -85,17 +86,30 @@ impl CodexStatusRecord {
 
 pub struct CodexProvider {
     root: PathBuf,
+    archived_sessions_root: Option<PathBuf>,
 }
 
 impl CodexProvider {
     pub fn new() -> Self {
         Self {
             root: default_runtime_root(),
+            archived_sessions_root: default_archived_sessions_root(),
         }
     }
 
     pub fn with_root(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            archived_sessions_root: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_roots(root: PathBuf, archived_sessions_root: PathBuf) -> Self {
+        Self {
+            root,
+            archived_sessions_root: Some(archived_sessions_root),
+        }
     }
 
     fn scan_files(&self) -> Result<Vec<PathBuf>> {
@@ -117,6 +131,17 @@ impl CodexProvider {
     pub fn parse_file(path: &Path) -> Result<CodexStatusRecord> {
         let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
         serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))
+    }
+
+    fn archived_session_ids(&self) -> HashSet<String> {
+        self.archived_sessions_root
+            .as_deref()
+            .and_then(|root| fs::read_dir(root).ok())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| archived_session_id_from_path(&entry.path()))
+            .collect()
     }
 }
 
@@ -141,6 +166,7 @@ impl AgentProvider for CodexProvider {
                 .with_exe(UpdateKind::OnlyIfNotSet),
         );
         let now = SystemTime::now();
+        let archived_session_ids = self.archived_session_ids();
         let mut snapshots = Vec::new();
         for path in self.scan_files()? {
             let record = match Self::parse_file(&path) {
@@ -150,6 +176,9 @@ impl AgentProvider for CodexProvider {
                     continue;
                 }
             };
+            if archived_session_ids.contains(&record.session_id) {
+                continue;
+            }
             let last_activity = record.last_activity(&path);
             if now.duration_since(last_activity).unwrap_or_default() > MAX_RECORD_AGE
                 || !is_codex_process(&system, record.pid, last_activity)
@@ -196,20 +225,43 @@ impl AgentProvider for CodexProvider {
 
     fn watch(&self) -> Result<ProviderWatcher> {
         fs::create_dir_all(&self.root)?;
-        let (tx, changes) = crossbeam_channel::unbounded();
+        // Coalesce filesystem bursts: the receiver only needs to know that at
+        // least one change happened since the previous refresh.
+        let (tx, changes) = crossbeam_channel::bounded(1);
         let mut watcher =
             notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
                 if event.is_ok() {
-                    let _ = tx.send(());
+                    let _ = tx.try_send(());
                 }
             })?;
         watcher.watch(&self.root, RecursiveMode::NonRecursive)?;
+        if let Some(root) = self
+            .archived_sessions_root
+            .as_deref()
+            .filter(|root| root.is_dir())
+        {
+            watcher.watch(root, RecursiveMode::NonRecursive)?;
+        }
         Ok(ProviderWatcher::new(watcher, changes))
     }
 
     fn runtime_root(&self) -> &Path {
         &self.root
     }
+}
+
+fn default_archived_sessions_root() -> Option<PathBuf> {
+    directories::UserDirs::new().map(|dirs| dirs.home_dir().join(".codex/archived_sessions"))
+}
+
+fn archived_session_id_from_path(path: &Path) -> Option<String> {
+    let stem = path.file_stem()?.to_str()?;
+    let session_id = stem.get(stem.len().checked_sub(36)?..)?;
+    (session_id.len() == 36
+        && session_id
+            .chars()
+            .all(|character| character.is_ascii_hexdigit() || character == '-'))
+    .then(|| session_id.to_owned())
 }
 
 fn provider_usage(rate_limits: &CodexRateLimits) -> Option<ProviderUsage> {
@@ -351,6 +403,35 @@ mod tests {
             provider.usage().unwrap().unwrap().highest_used_percentage(),
             Some(41.0)
         );
+    }
+
+    #[test]
+    fn recognizes_archived_session_ids_without_reading_transcripts() {
+        let path =
+            Path::new("rollout-2026-07-16T11-34-13-019f6a46-cf27-7d53-9559-2228c6ab755f.jsonl");
+        assert_eq!(
+            archived_session_id_from_path(path).as_deref(),
+            Some("019f6a46-cf27-7d53-9559-2228c6ab755f")
+        );
+        assert!(archived_session_id_from_path(Path::new("unrelated.jsonl")).is_none());
+    }
+
+    #[test]
+    fn archived_sessions_are_discovered_from_filenames() {
+        let runtime = tempfile::tempdir().unwrap();
+        let archived = tempfile::tempdir().unwrap();
+        let session_id = "019f6a46-cf27-7d53-9559-2228c6ab755f";
+        fs::write(
+            archived
+                .path()
+                .join(format!("rollout-2026-07-16T11-34-13-{session_id}.jsonl")),
+            "content is deliberately never inspected",
+        )
+        .unwrap();
+
+        let provider =
+            CodexProvider::with_roots(runtime.path().to_path_buf(), archived.path().to_path_buf());
+        assert!(provider.archived_session_ids().contains(session_id));
     }
 
     #[test]

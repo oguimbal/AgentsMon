@@ -23,6 +23,8 @@ const SCREEN_INSET: f32 = 0.0;
 const DETAILS_WIDTH: f32 = 400.0;
 const DETAILS_HEIGHT: f32 = 176.0;
 const DETAILS_GAP: f32 = 6.0;
+const WATCHED_POLL_INTERVAL: Duration = Duration::from_secs(10);
+const FALLBACK_POLL_INTERVAL: Duration = Duration::from_secs(3);
 
 mod notification;
 
@@ -60,7 +62,7 @@ fn main() {
             Arc::new(ClaudeProvider::new()),
             Arc::new(CodexProvider::new()),
         ];
-        let watchers = providers
+        let watchers: Vec<_> = providers
             .iter()
             .filter_map(|provider| {
                 provider
@@ -72,6 +74,11 @@ fn main() {
                     .ok()
             })
             .collect();
+        let poll_interval = if watchers.len() == providers.len() {
+            WATCHED_POLL_INTERVAL
+        } else {
+            FALLBACK_POLL_INTERVAL
+        };
         let state = AppState(Rc::new(AppStateInner {
             store: RefCell::new(AgentStore::default()),
             provider_statuses: RefCell::new(Vec::new()),
@@ -99,7 +106,7 @@ fn main() {
         refresh(&state, cx);
         reconcile_displays(cx, &state, true);
         ensure_integrations(cx);
-        spawn_refresh_loop(cx, state);
+        spawn_refresh_loop(cx, state, poll_interval);
     });
 }
 
@@ -225,8 +232,17 @@ fn refresh(state: &AppState, cx: &mut App) {
         })
         .cloned()
         .collect();
+    let active_ids: Vec<_> = snapshots
+        .iter()
+        .filter(|snapshot| snapshot.state == agentsmon_core::AgentState::Active)
+        .map(|snapshot| snapshot.id.clone())
+        .collect();
     state.0.store.borrow_mut().apply_snapshot(snapshots);
     *state.0.provider_statuses.borrow_mut() = provider_statuses;
+    for id in active_ids {
+        state.0.unread.borrow_mut().remove(&id);
+        state.0.notifications.close(&id);
+    }
     for snapshot in completed {
         state.0.unread.borrow_mut().insert(snapshot.id.clone());
         state.0.notifications.show(&snapshot);
@@ -234,8 +250,8 @@ fn refresh(state: &AppState, cx: &mut App) {
     broadcast(state, cx);
 }
 
-fn spawn_refresh_loop(cx: &mut App, state: AppState) {
-    let mut last_poll = Instant::now() - Duration::from_secs(3);
+fn spawn_refresh_loop(cx: &mut App, state: AppState, poll_interval: Duration) {
+    let mut last_poll = Instant::now();
     cx.spawn(async move |cx: &mut AsyncApp| loop {
         while let Some(id) = state.0.notifications.try_clicked() {
             cx.update(|cx| focus_agent(&id, &state, cx));
@@ -251,7 +267,7 @@ fn spawn_refresh_loop(cx: &mut App, state: AppState) {
             .borrow()
             .iter()
             .any(|watcher| watcher.changes.try_recv().is_ok());
-        if changed || last_poll.elapsed() >= Duration::from_secs(3) {
+        if changed || last_poll.elapsed() >= poll_interval {
             cx.update(|cx| {
                 refresh(&state, cx);
                 reconcile_displays(cx, &state, false);

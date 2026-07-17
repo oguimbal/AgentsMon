@@ -7,14 +7,12 @@ use agentsmon_core::{
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use crossbeam_channel::{unbounded, Receiver};
+use crossbeam_channel::{bounded, Receiver};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 use crate::{focus, AgentProvider};
-
-const INTERRUPTED_ACTIVITY_GRACE: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CStatusRecord {
@@ -74,16 +72,6 @@ impl CStatusRecord {
             "compacting" => AgentState::Compacting,
             _ => AgentState::Idle,
         }
-    }
-
-    fn effective_state(&self, last_activity: SystemTime, now: SystemTime) -> AgentState {
-        settle_interrupted_activity(
-            self.state(),
-            &self.event,
-            &self.activity,
-            last_activity,
-            now,
-        )
     }
 
     fn last_activity(&self, file: &Path) -> SystemTime {
@@ -189,7 +177,7 @@ impl AgentProvider for ClaudeProvider {
             let cwd = PathBuf::from(&record.cwd);
             let (host_pid, detected_host_app) =
                 find_host(&system, record.pid, record.ppid, record.focused_app_pid);
-            let state = record.effective_state(last_activity, SystemTime::now());
+            let state = record.state();
             let host_app = record.host_app.or(detected_host_app);
             let uri = focus_uri(&host_app, &cwd, &record.session_id);
             snapshots.push(AgentSnapshot {
@@ -234,11 +222,14 @@ impl AgentProvider for ClaudeProvider {
 
     fn watch(&self) -> Result<ProviderWatcher> {
         fs::create_dir_all(&self.root)?;
-        let (tx, changes) = unbounded();
+        // A watcher notification only means "refresh needed". Keep at most one
+        // pending signal so a burst of writes cannot turn into a long series of
+        // expensive process-table scans.
+        let (tx, changes) = bounded(1);
         let mut watcher =
             notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
                 if event.is_ok() {
-                    let _ = tx.send(());
+                    let _ = tx.try_send(());
                 }
             })?;
         watcher.watch(&self.root, RecursiveMode::Recursive)?;
@@ -273,27 +264,6 @@ fn provider_usage(rate_limits: &ClaudeRateLimits) -> Option<ProviderUsage> {
     .collect();
     let usage = ProviderUsage { limits, plan: None };
     (!usage.is_empty()).then_some(usage)
-}
-
-fn settle_interrupted_activity(
-    state: AgentState,
-    event: &str,
-    activity: &str,
-    last_activity: SystemTime,
-    now: SystemTime,
-) -> AgentState {
-    if state != AgentState::Active
-        || matches!(event, "PreToolUse" | "SubagentStart")
-        || activity == "background task"
-    {
-        return state;
-    }
-
-    if now.duration_since(last_activity).unwrap_or_default() >= INTERRUPTED_ACTIVITY_GRACE {
-        AgentState::Idle
-    } else {
-        state
-    }
 }
 
 pub fn default_projects_root() -> PathBuf {
@@ -462,57 +432,12 @@ mod tests {
     }
 
     #[test]
-    fn settles_active_model_work_when_interrupt_emits_no_stop() {
-        let started = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
-        let before_grace = started + INTERRUPTED_ACTIVITY_GRACE - Duration::from_millis(1);
-        let after_grace = started + INTERRUPTED_ACTIVITY_GRACE;
-
-        assert_eq!(
-            settle_interrupted_activity(
-                AgentState::Active,
-                "UserPromptSubmit",
-                "",
-                started,
-                before_grace,
-            ),
-            AgentState::Active
-        );
-        assert_eq!(
-            settle_interrupted_activity(
-                AgentState::Active,
-                "UserPromptSubmit",
-                "",
-                started,
-                after_grace,
-            ),
-            AgentState::Idle
-        );
-    }
-
-    #[test]
-    fn does_not_expire_an_explicitly_running_tool_or_background_task() {
-        let started = SystemTime::UNIX_EPOCH;
-        let much_later = started + Duration::from_secs(300);
-        assert_eq!(
-            settle_interrupted_activity(
-                AgentState::Active,
-                "PreToolUse",
-                "Bash",
-                started,
-                much_later,
-            ),
-            AgentState::Active
-        );
-        assert_eq!(
-            settle_interrupted_activity(
-                AgentState::Active,
-                "Stop",
-                "background task",
-                started,
-                much_later,
-            ),
-            AgentState::Active
-        );
+    fn active_state_requires_an_explicit_lifecycle_event_to_end() {
+        let record: CStatusRecord = serde_json::from_str(
+            r#"{"session_id":"s","pid":42,"state":"active","event":"UserPromptSubmit","timestamp":"2026-07-16T10:00:00Z"}"#,
+        )
+        .unwrap();
+        assert_eq!(record.state(), AgentState::Active);
     }
 
     #[test]

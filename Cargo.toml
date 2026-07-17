@@ -43,3 +43,10 @@ notify-rust = { version = "4.18", default-features = false, features = ["preview
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+# Production-like build intended for Instruments, sample(1), and profilers.
+# It keeps optimizations enabled while preserving line tables and symbols.
+[profile.profiling]
+inherits = "release"
+debug = 1
+strip = "none"
