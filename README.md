@@ -58,7 +58,7 @@ On Windows:
 
 ## Claude integration
 
-At launch, AgentsMon automatically installs or repairs the user-scoped Claude integration when needed. An existing compatible Claude Status hook is recognized, in which case AgentsMon only adds the context indicator integration. The application menu keeps a diagnostic screen for inspecting or disabling the integration.
+At launch, AgentsMon automatically installs or repairs the user-scoped Claude integration when needed. Existing compatible status plugins can remain installed; AgentsMon adds its own metadata-only lifecycle hooks alongside them so completed turns and approval states are tracked reliably. The application menu keeps a diagnostic screen for inspecting or disabling the integration.
 
 The helper records only session metadata in `~/.claude/projects/*/*.cstatus`. For context usage, it receives Claude Code's official `context_window.used_percentage` status-line field. If a status line already exists, AgentsMon stores it and proxies its input/output instead of replacing its visible behavior.
 

@@ -64,7 +64,7 @@ pub fn path_from_transcript(transcript: &str, session_id: &str) -> Result<PathBu
     let parent = Path::new(transcript)
         .parent()
         .context("transcript has no parent")?;
-    Ok(parent.join(format!("{session_id}.cstatus")))
+    Ok(parent.join(format!("{session_id}.agentsmon.cstatus")))
 }
 
 pub fn merge_record(path: &Path, update: RecordUpdate<'_>) -> Result<()> {
@@ -122,9 +122,10 @@ pub fn merge_record(path: &Path, update: RecordUpdate<'_>) -> Result<()> {
         context_used_percentage: update
             .context_percentage
             .or_else(|| previous.as_ref().and_then(|r| r.context_used_percentage)),
-        rate_limits: update
-            .rate_limits
-            .or_else(|| previous.as_ref().and_then(|r| r.rate_limits.clone())),
+        rate_limits: merge_rate_limits(
+            update.rate_limits,
+            previous.as_ref().and_then(|r| r.rate_limits.clone()),
+        ),
         host_app: environment
             .host_app
             .or_else(|| previous.as_ref().and_then(|r| r.host_app.clone())),
@@ -154,6 +155,19 @@ pub fn merge_record(path: &Path, update: RecordUpdate<'_>) -> Result<()> {
     replace_atomically(&temp, path)?;
     FileExt::unlock(&lock)?;
     Ok(())
+}
+
+fn merge_rate_limits(
+    update: Option<ClaudeRateLimits>,
+    previous: Option<ClaudeRateLimits>,
+) -> Option<ClaudeRateLimits> {
+    match (update, previous) {
+        (Some(update), Some(previous)) => Some(ClaudeRateLimits {
+            five_hour: update.five_hour.or(previous.five_hour),
+            seven_day: update.seven_day.or(previous.seven_day),
+        }),
+        (update, previous) => update.or(previous),
+    }
 }
 
 struct EnvironmentMetadata {
@@ -237,12 +251,28 @@ pub fn find_session_records(session_id: &str) -> Vec<PathBuf> {
         return vec![];
     };
     let root = home.home_dir().join(".claude/projects");
-    fs::read_dir(root)
+    let project_directories: Vec<_> = fs::read_dir(root)
         .into_iter()
         .flatten()
         .flatten()
-        .map(|entry| entry.path().join(format!("{session_id}.cstatus")))
+        .map(|entry| entry.path())
+        .collect();
+    let owned: Vec<_> = project_directories
+        .iter()
+        .map(|directory| directory.join(format!("{session_id}.agentsmon.cstatus")))
         .filter(|path| path.exists())
+        .collect();
+    if !owned.is_empty() {
+        return owned;
+    }
+    project_directories
+        .into_iter()
+        .filter_map(|directory| {
+            directory
+                .join(format!("{session_id}.cstatus"))
+                .exists()
+                .then(|| directory.join(format!("{session_id}.agentsmon.cstatus")))
+        })
         .collect()
 }
 
@@ -312,6 +342,32 @@ mod tests {
     }
 
     #[test]
+    fn partial_rate_limit_updates_preserve_both_windows() {
+        let five_hour = ClaudeRateLimitWindow {
+            used_percentage: 21.0,
+            resets_at: None,
+        };
+        let seven_day = ClaudeRateLimitWindow {
+            used_percentage: 63.0,
+            resets_at: None,
+        };
+        let merged = merge_rate_limits(
+            Some(ClaudeRateLimits {
+                five_hour: None,
+                seven_day: Some(seven_day),
+            }),
+            Some(ClaudeRateLimits {
+                five_hour: Some(five_hour),
+                seven_day: None,
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(merged.five_hour.unwrap().used_percentage, 21.0);
+        assert_eq!(merged.seven_day.unwrap().used_percentage, 63.0);
+    }
+
+    #[test]
     fn concurrent_updates_leave_a_complete_record() {
         let directory = tempfile::tempdir().unwrap();
         let path = Arc::new(directory.path().join("session.cstatus"));
@@ -340,5 +396,13 @@ mod tests {
             Some("/tmp/a,b/default")
         );
         assert_eq!(tmux_socket("invalid"), None);
+    }
+
+    #[test]
+    fn lifecycle_records_have_an_agentsmon_owned_name() {
+        assert_eq!(
+            path_from_transcript("/tmp/project/session.jsonl", "session").unwrap(),
+            PathBuf::from("/tmp/project/session.agentsmon.cstatus")
+        );
     }
 }

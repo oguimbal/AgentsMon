@@ -3,18 +3,19 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP="$ROOT/dist/AgentsMon.app"
+BUILD_PROFILE="${AGENTSMON_BUILD_PROFILE:-release}"
 
 cd "$ROOT"
 RUSTC="$(rustup which --toolchain stable rustc)" \
 RUSTDOC="$(rustup which --toolchain stable rustdoc)" \
-  rustup run stable cargo build --release -p agentsmon -p agentsmon-helper
+  rustup run stable cargo build --profile "$BUILD_PROFILE" -p agentsmon -p agentsmon-helper
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/bin" "$APP/Contents/Resources/codex-plugin/bin"
-cp target/release/agentsmon "$APP/Contents/MacOS/agentsmon"
-cp target/release/agentsmon-helper "$APP/Contents/Resources/bin/agentsmon-helper"
+cp "target/$BUILD_PROFILE/agentsmon" "$APP/Contents/MacOS/agentsmon"
+cp "target/$BUILD_PROFILE/agentsmon-helper" "$APP/Contents/Resources/bin/agentsmon-helper"
 cp -R plugins/agentsmon-codex/. "$APP/Contents/Resources/codex-plugin/"
-cp target/release/agentsmon-helper "$APP/Contents/Resources/codex-plugin/bin/agentsmon-helper"
+cp "target/$BUILD_PROFILE/agentsmon-helper" "$APP/Contents/Resources/codex-plugin/bin/agentsmon-helper"
 cp bundle/Info.plist "$APP/Contents/Info.plist"
 chmod +x "$APP/Contents/MacOS/agentsmon" "$APP/Contents/Resources/bin/agentsmon-helper" "$APP/Contents/Resources/codex-plugin/bin/agentsmon-helper"
 

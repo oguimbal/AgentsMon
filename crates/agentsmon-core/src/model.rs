@@ -76,6 +76,9 @@ impl UsageLimit {
 pub struct ProviderUsage {
     pub limits: Vec<UsageLimit>,
     pub plan: Option<String>,
+    /// The last refresh failed (expired login, network…); values may be outdated.
+    #[serde(default)]
+    pub stale: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -158,6 +161,7 @@ mod tests {
                 UsageLimit::new("7 j", 71.5, Some(10_080), None).unwrap(),
             ],
             plan: Some("Plus".into()),
+            stale: false,
         };
         assert_eq!(usage.highest_used_percentage(), Some(71.5));
         assert_eq!(

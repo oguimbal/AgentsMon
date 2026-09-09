@@ -2,6 +2,7 @@ mod codex;
 mod foreground;
 mod record;
 mod statusline;
+mod transcript;
 
 use std::io::{self, Read};
 
@@ -66,7 +67,9 @@ fn process_hook(input: &[u8]) -> Result<()> {
             event: &hook.hook_event_name,
             state,
             activity,
-            context_percentage: None,
+            // Sessions without a status line (VS Code, claude.ai) only learn
+            // their context usage from the transcript tail.
+            context_percentage: transcript::context_percentage(&hook.transcript_path),
             rate_limits: None,
         },
     )
@@ -76,6 +79,12 @@ fn event_state(input: &HookInput) -> (&'static str, String) {
     match input.hook_event_name.as_str() {
         "SessionStart" => ("idle", String::new()),
         "PermissionRequest" | "Elicitation" | "ElicitationResult" => ("waiting", "input".into()),
+        // Claude's VS Code extension can show the plan approval UI without
+        // emitting PermissionRequest. PreToolUse is delivered before that UI,
+        // so treat ExitPlanMode itself as the actionable wait boundary.
+        "PreToolUse" if input.tool_name.as_deref() == Some("ExitPlanMode") => {
+            ("waiting", "input".into())
+        }
         "Notification" if input.notification_type.as_deref() == Some("auth_success") => {
             ("active", "auth_success".into())
         }
@@ -121,5 +130,15 @@ mod tests {
         assert_eq!(event_state(&hook("PreCompact")).0, "compacting");
         assert_eq!(event_state(&hook("PostCompact")).0, "active");
         assert_eq!(event_state(&hook("Stop")).0, "idle");
+    }
+
+    #[test]
+    fn waits_while_a_proposed_plan_needs_a_decision() {
+        let mut input = hook("PreToolUse");
+        input.tool_name = Some("ExitPlanMode".into());
+        assert_eq!(event_state(&input), ("waiting", "input".into()));
+
+        input.hook_event_name = "PostToolUse".into();
+        assert_eq!(event_state(&input), ("active", "ExitPlanMode".into()));
     }
 }

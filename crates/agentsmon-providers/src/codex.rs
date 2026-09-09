@@ -157,10 +157,29 @@ impl AgentProvider for CodexProvider {
     }
 
     fn discover(&self) -> Result<Vec<AgentSnapshot>> {
+        let records: Vec<_> = self
+            .scan_files()?
+            .into_iter()
+            .filter_map(|path| match Self::parse_file(&path) {
+                Ok(record) => {
+                    let last_activity = record.last_activity(&path);
+                    Some((record, last_activity))
+                }
+                Err(error) => {
+                    tracing::debug!(%error, "ignore incomplete Codex status write");
+                    None
+                }
+            })
+            .collect();
         let mut system = System::new();
+        let pids: Vec<_> = records
+            .iter()
+            .filter(|(record, _)| record.pid > 0)
+            .map(|(record, _)| Pid::from_u32(record.pid as u32))
+            .collect();
         system.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
+            ProcessesToUpdate::Some(&pids),
+            false,
             ProcessRefreshKind::nothing()
                 .with_cmd(UpdateKind::OnlyIfNotSet)
                 .with_exe(UpdateKind::OnlyIfNotSet),
@@ -168,18 +187,10 @@ impl AgentProvider for CodexProvider {
         let now = SystemTime::now();
         let archived_session_ids = self.archived_session_ids();
         let mut snapshots = Vec::new();
-        for path in self.scan_files()? {
-            let record = match Self::parse_file(&path) {
-                Ok(record) => record,
-                Err(error) => {
-                    tracing::debug!(%error, "ignore incomplete Codex status write");
-                    continue;
-                }
-            };
+        for (record, last_activity) in records {
             if archived_session_ids.contains(&record.session_id) {
                 continue;
             }
-            let last_activity = record.last_activity(&path);
             if now.duration_since(last_activity).unwrap_or_default() > MAX_RECORD_AGE
                 || !is_codex_process(&system, record.pid, last_activity)
             {
@@ -284,6 +295,7 @@ fn provider_usage(rate_limits: &CodexRateLimits) -> Option<ProviderUsage> {
     let usage = ProviderUsage {
         limits,
         plan: rate_limits.plan_type.clone(),
+        stale: false,
     };
     (!usage.is_empty()).then_some(usage)
 }

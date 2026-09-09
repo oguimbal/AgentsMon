@@ -42,10 +42,6 @@ pub fn inspect() -> DiagnosticsStatus {
     }
 }
 
-pub fn compatible_hook_found() -> bool {
-    inspect().hook_found
-}
-
 fn installed_plugin_names() -> Vec<String> {
     let registry = home_dir().join(".claude/plugins/installed_plugins.json");
     fs::read(registry)
@@ -66,18 +62,32 @@ pub fn install() -> Result<()> {
     fs::copy(&helper_source, &stable_helper)
         .with_context(|| format!("copy helper from {}", helper_source.display()))?;
     make_executable(&stable_helper)?;
+    sync_plugin_bundle(data, helper_name, &stable_helper)?;
 
-    if !compatible_hook_found() {
-        install_plugin(data, helper_name, &stable_helper)?;
+    // Compatible status plugins can provide initial discovery, but some do not
+    // subscribe to Stop or tool lifecycle events. Install our hooks alongside
+    // them so waiting states are always cleared authoritatively.
+    if !inspect().plugin_found {
+        install_plugin(data)?;
+    } else {
+        repair_installed_plugins(helper_name, &stable_helper)?;
     }
 
     install_statusline_proxy(&stable_helper, dirs.config_dir())
 }
 
-fn install_plugin(data: &Path, helper_name: &str, stable_helper: &Path) -> Result<()> {
-    let claude = claude_executable().context(
-        "Claude Code est introuvable. Vérifiez son installation puis relancez AgentsMon.",
-    )?;
+fn repair_installed_plugins(helper_name: &str, stable_helper: &Path) -> Result<()> {
+    for plugin in installed_agentsmon_paths() {
+        let helper = plugin.join("bin").join(helper_name);
+        fs::create_dir_all(helper.parent().unwrap())?;
+        fs::copy(stable_helper, &helper)?;
+        make_executable(&helper)?;
+        write_text(&plugin.join("hooks/hooks.json"), HOOKS)?;
+    }
+    Ok(())
+}
+
+fn sync_plugin_bundle(data: &Path, helper_name: &str, stable_helper: &Path) -> Result<()> {
     let marketplace = data.join("marketplace");
     write_text(
         &marketplace.join(".claude-plugin/marketplace.json"),
@@ -91,7 +101,36 @@ fn install_plugin(data: &Path, helper_name: &str, stable_helper: &Path) -> Resul
     let plugin_helper = marketplace.join("claude-plugin/bin").join(helper_name);
     fs::create_dir_all(plugin_helper.parent().unwrap())?;
     fs::copy(stable_helper, &plugin_helper)?;
-    make_executable(&plugin_helper)?;
+    make_executable(&plugin_helper)
+}
+
+fn installed_agentsmon_paths() -> Vec<PathBuf> {
+    let registry = home_dir().join(".claude/plugins/installed_plugins.json");
+    fs::read(registry)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .and_then(|json| {
+            json.get("plugins")?
+                .get("agentsmon@agentsmon-local")?
+                .as_array()
+                .cloned()
+        })
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            entry
+                .get("installPath")
+                .and_then(Value::as_str)
+                .map(PathBuf::from)
+        })
+        .collect()
+}
+
+fn install_plugin(data: &Path) -> Result<()> {
+    let claude = claude_executable().context(
+        "Claude Code est introuvable. Vérifiez son installation puis relancez AgentsMon.",
+    )?;
+    let marketplace = data.join("marketplace");
 
     let _ = Command::new(&claude)
         .args(["plugin", "marketplace", "add"])

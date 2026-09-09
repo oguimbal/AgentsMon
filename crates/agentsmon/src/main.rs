@@ -25,6 +25,7 @@ const DETAILS_HEIGHT: f32 = 176.0;
 const DETAILS_GAP: f32 = 6.0;
 const WATCHED_POLL_INTERVAL: Duration = Duration::from_secs(10);
 const FALLBACK_POLL_INTERVAL: Duration = Duration::from_secs(3);
+const CHANGE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 mod notification;
 
@@ -115,13 +116,10 @@ fn ensure_integrations(cx: &mut App) {
     let _ = std::thread::Builder::new()
         .name("agentsmon-integration-setup".into())
         .spawn(move || {
-            let status = integration::inspect();
-            if !(status.hook_found && status.statusline_wrapped) {
-                match integration::install() {
-                    Ok(()) => tracing::info!("Claude integration installed automatically"),
-                    Err(error) => {
-                        tracing::warn!(%error, "automatic Claude integration setup failed; use the application diagnostic to retry")
-                    }
+            match integration::install() {
+                Ok(()) => tracing::info!("Claude integration installed or repaired automatically"),
+                Err(error) => {
+                    tracing::warn!(%error, "automatic Claude integration setup failed; use the application diagnostic to retry")
                 }
             }
             match codex_integration::install() {
@@ -251,7 +249,8 @@ fn refresh(state: &AppState, cx: &mut App) {
 }
 
 fn spawn_refresh_loop(cx: &mut App, state: AppState, poll_interval: Duration) {
-    let mut last_poll = Instant::now();
+    let mut last_refresh = Instant::now();
+    let mut refresh_pending = false;
     cx.spawn(async move |cx: &mut AsyncApp| loop {
         while let Some(id) = state.0.notifications.try_clicked() {
             cx.update(|cx| focus_agent(&id, &state, cx));
@@ -266,13 +265,23 @@ fn spawn_refresh_loop(cx: &mut App, state: AppState, poll_interval: Duration) {
             .watchers
             .borrow()
             .iter()
-            .any(|watcher| watcher.changes.try_recv().is_ok());
-        if changed || last_poll.elapsed() >= poll_interval {
+            // Always drain one signal from every bounded watcher. `any`
+            // short-circuits and leaves the other provider queued, which
+            // needlessly schedules another full refresh on the next tick.
+            .filter(|watcher| watcher.changes.try_recv().is_ok())
+            .count()
+            > 0;
+        refresh_pending |= changed;
+        let elapsed = last_refresh.elapsed();
+        let periodic_refresh_due = elapsed >= poll_interval;
+        let changed_refresh_due = refresh_pending && elapsed >= CHANGE_REFRESH_INTERVAL;
+        if periodic_refresh_due || changed_refresh_due {
             cx.update(|cx| {
                 refresh(&state, cx);
                 reconcile_displays(cx, &state, false);
             });
-            last_poll = Instant::now();
+            refresh_pending = false;
+            last_refresh = Instant::now();
         }
         cx.background_executor()
             .timer(Duration::from_millis(75))

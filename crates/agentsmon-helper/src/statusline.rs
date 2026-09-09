@@ -77,7 +77,14 @@ fn run_original(input: &[u8]) -> Result<()> {
     let Some(config) = original_config() else {
         return Ok(());
     };
-    let bytes = std::fs::read(config)?;
+    // No saved statusline means the user had none before AgentsMon wrapped
+    // the setting; a proxy failure here would make Claude Code report the
+    // whole statusline command as broken.
+    let bytes = match std::fs::read(config) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
     let original: OriginalStatusLine = serde_json::from_slice(&bytes)?;
     if original.command.trim().is_empty() {
         return Ok(());

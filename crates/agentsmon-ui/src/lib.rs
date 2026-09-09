@@ -4,7 +4,9 @@ use std::collections::HashSet;
 use std::f32::consts::PI;
 use std::sync::{Arc, OnceLock};
 
-use agentsmon_core::{AgentId, AgentSnapshot, AgentState, ProviderStatus, ProviderUsage};
+use agentsmon_core::{
+    AgentId, AgentSnapshot, AgentState, ProviderStatus, ProviderUsage, UsageLimit,
+};
 use gpui::prelude::*;
 use gpui::{
     canvas, div, img, point, px, rgb, rgba, Context, DragMoveEvent, EventEmitter, Hsla, Image,
@@ -72,10 +74,7 @@ impl MonitorView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let details = provider.clone();
-        let percentage = provider
-            .usage
-            .as_ref()
-            .and_then(ProviderUsage::highest_used_percentage);
+        let usage = provider.usage.clone();
         div()
             .id(SharedString::from(format!("provider-{}", provider.id)))
             .flex()
@@ -96,7 +95,7 @@ impl MonitorView {
                     cx.emit(MonitorEvent::HideDetails);
                 }
             }))
-            .child(provider_ring(provider.id, percentage))
+            .child(provider_ring(provider.id, usage))
     }
 
     fn render_card(&self, agent: AgentSnapshot, cx: &mut Context<Self>) -> impl IntoElement {
@@ -108,6 +107,7 @@ impl MonitorView {
         let context = agent.context_usage.map(|usage| usage.used_percentage());
         let hover_details = agent.clone();
         let is_unread = self.unread.contains(&id);
+        let state_background = state_color(agent.state);
 
         div()
             .id(SharedString::from(format!(
@@ -120,9 +120,8 @@ impl MonitorView {
             .h(px(17.0))
             .px(px(5.0))
             .rounded_full()
-            .bg(rgba(0x25262bf2))
+            .bg(state_background)
             .relative()
-            .hover(|style| style.bg(rgb(0x303138)))
             .cursor_pointer()
             .on_mouse_move(|_, _, cx| cx.stop_propagation())
             .on_hover(cx.listener(move |_, hovered: &bool, window, cx| {
@@ -178,7 +177,7 @@ impl MonitorView {
                 div()
                     .id(SharedString::from(format!("context-{}", id.session_id)))
                     .size(px(12.0))
-                    .child(context_ring(agent.state, context)),
+                    .child(context_pie(context)),
             )
             .child(
                 div()
@@ -336,13 +335,12 @@ fn state_color(state: AgentState) -> Hsla {
     match state {
         AgentState::Active => rgb(0x43c46b).into(),
         AgentState::Waiting => rgb(0xf0a33a).into(),
-        AgentState::Idle => rgb(0x7c7f87).into(),
+        AgentState::Idle => rgba(0x25262bf2).into(),
         AgentState::Compacting => rgb(0x4f8df7).into(),
     }
 }
 
-fn context_ring(state: AgentState, percentage: Option<f32>) -> impl IntoElement {
-    let dot = state_color(state);
+fn context_pie(percentage: Option<f32>) -> impl IntoElement {
     canvas(
         |_, _, _| {},
         move |bounds, _, window, _| {
@@ -350,36 +348,16 @@ fn context_ring(state: AgentState, percentage: Option<f32>) -> impl IntoElement 
                 bounds.origin.x + bounds.size.width / 2.0,
                 bounds.origin.y + bounds.size.height / 2.0,
             );
-            let radius = px(4.5);
-            draw_circle(window, center, radius, px(1.0), rgb(0x555861).into());
+            let radius = px(5.0);
+            draw_filled_circle(window, center, radius, rgb(0x686b75).into());
             if let Some(progress) = ring_progress(percentage) {
-                draw_arc(
+                draw_pie(
                     window,
                     center,
                     radius,
-                    px(1.0),
                     progress,
                     rgb(context_ring_color(percentage.unwrap_or_default())).into(),
                 );
-            }
-            let mut point_builder = PathBuilder::fill();
-            point_builder.move_to(point(center.x + px(2.5), center.y));
-            point_builder.arc_to(
-                point(px(2.5), px(2.5)),
-                px(0.0),
-                false,
-                true,
-                point(center.x - px(2.5), center.y),
-            );
-            point_builder.arc_to(
-                point(px(2.5), px(2.5)),
-                px(0.0),
-                false,
-                true,
-                point(center.x + px(2.5), center.y),
-            );
-            if let Ok(path) = point_builder.build() {
-                window.paint_path(path, dot);
             }
         },
     )
@@ -400,9 +378,22 @@ fn context_ring_color(percentage: f32) -> u32 {
     }
 }
 
-fn provider_ring(provider: String, percentage: Option<f32>) -> impl IntoElement {
+fn provider_ring(provider: String, usage: Option<ProviderUsage>) -> impl IntoElement {
     let logo = provider_logo(&provider);
     let has_logo = logo.is_some();
+    let percentages: Vec<_> = usage
+        .as_ref()
+        .map(|usage| {
+            usage
+                .limits
+                .iter()
+                .take(3)
+                .map(UsageLimit::used_percentage)
+                .collect()
+        })
+        .unwrap_or_default();
+    let stale = usage.as_ref().is_some_and(|usage| usage.stale);
+    let three_rings = percentages.len() >= 3;
     div()
         .relative()
         .size(px(14.0))
@@ -414,20 +405,29 @@ fn provider_ring(provider: String, percentage: Option<f32>) -> impl IntoElement 
                         bounds.origin.x + bounds.size.width / 2.0,
                         bounds.origin.y + bounds.size.height / 2.0,
                     );
-                    let radius = px(5.5);
-                    draw_circle(window, center, radius, px(1.0), rgb(0x555861).into());
-                    if let Some(progress) = ring_progress(percentage) {
+                    for (index, percentage) in percentages.iter().copied().enumerate() {
+                        let radius = px([6.0, 4.3, 2.6][index]);
+                        draw_circle(window, center, radius, px(1.0), rgb(0x555861).into());
                         draw_arc(
                             window,
                             center,
                             radius,
                             px(1.0),
-                            progress,
-                            rgb(context_ring_color(percentage.unwrap_or_default())).into(),
+                            ring_progress(Some(percentage)).unwrap_or_default(),
+                            rgb(context_ring_color(percentage)).into(),
                         );
                     }
                     if !has_logo {
                         draw_circle(window, center, px(2.2), px(1.0), rgb(0xd5d6da).into());
+                    }
+                    if stale {
+                        draw_lock_badge(
+                            window,
+                            point(
+                                bounds.origin.x + bounds.size.width - px(3.5),
+                                bounds.origin.y + bounds.size.height - px(3.5),
+                            ),
+                        );
                     }
                 },
             )
@@ -437,13 +437,12 @@ fn provider_ring(provider: String, percentage: Option<f32>) -> impl IntoElement 
             .size(px(14.0)),
         )
         .when_some(logo, |ring, logo| {
-            ring.child(
-                img(logo)
-                    .absolute()
-                    .top(px(3.5))
-                    .left(px(3.5))
-                    .size(px(7.0)),
-            )
+            let (offset, size) = if three_rings {
+                (px(5.5), px(3.0))
+            } else {
+                (px(4.5), px(5.0))
+            };
+            ring.child(img(logo).absolute().top(offset).left(offset).size(size))
         })
 }
 
@@ -506,6 +505,99 @@ fn draw_circle(
         true,
         point(center.x + radius, center.y),
     );
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, color);
+    }
+}
+
+fn draw_filled_circle(
+    window: &mut Window,
+    center: gpui::Point<gpui::Pixels>,
+    radius: gpui::Pixels,
+    color: Hsla,
+) {
+    let mut builder = PathBuilder::fill();
+    builder.move_to(point(center.x + radius, center.y));
+    builder.arc_to(
+        point(radius, radius),
+        px(0.0),
+        false,
+        true,
+        point(center.x - radius, center.y),
+    );
+    builder.arc_to(
+        point(radius, radius),
+        px(0.0),
+        false,
+        true,
+        point(center.x + radius, center.y),
+    );
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, color);
+    }
+}
+
+/// Small amber padlock on a dark disc, signalling stale (logged-out) quota data.
+fn draw_lock_badge(window: &mut Window, center: gpui::Point<gpui::Pixels>) {
+    draw_filled_circle(window, center, px(3.5), rgb(0x1e1f24).into());
+    let lock_color: Hsla = rgb(0xf0a33a).into();
+
+    let shackle_radius = px(1.1);
+    let shackle_base = center.y - px(0.5);
+    let mut builder = PathBuilder::stroke(px(0.8));
+    builder.move_to(point(center.x - shackle_radius, shackle_base));
+    builder.arc_to(
+        point(shackle_radius, shackle_radius),
+        px(0.0),
+        false,
+        true,
+        point(center.x + shackle_radius, shackle_base),
+    );
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, lock_color);
+    }
+
+    let half_width = px(1.8);
+    let top = center.y - px(0.5);
+    let bottom = center.y + px(2.0);
+    let mut builder = PathBuilder::fill();
+    builder.move_to(point(center.x - half_width, top));
+    builder.line_to(point(center.x + half_width, top));
+    builder.line_to(point(center.x + half_width, bottom));
+    builder.line_to(point(center.x - half_width, bottom));
+    builder.line_to(point(center.x - half_width, top));
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, lock_color);
+    }
+}
+
+fn draw_pie(
+    window: &mut Window,
+    center: gpui::Point<gpui::Pixels>,
+    radius: gpui::Pixels,
+    progress: f32,
+    color: Hsla,
+) {
+    let progress = progress.clamp(0.0, 1.0);
+    if progress <= 0.0 {
+        return;
+    }
+    if progress >= 0.999 {
+        draw_filled_circle(window, center, radius, color);
+        return;
+    }
+
+    let start = point(center.x, center.y - radius);
+    let angle = -PI / 2.0 + progress * 2.0 * PI;
+    let end = point(
+        center.x + radius * angle.cos(),
+        center.y + radius * angle.sin(),
+    );
+    let mut builder = PathBuilder::fill();
+    builder.move_to(center);
+    builder.line_to(start);
+    builder.arc_to(point(radius, radius), px(0.0), progress > 0.5, true, end);
+    builder.line_to(center);
     if let Ok(path) = builder.build() {
         window.paint_path(path, color);
     }
@@ -670,7 +762,7 @@ impl Render for AgentDetailsView {
 }
 
 fn usage_rows(usage: &ProviderUsage) -> Vec<(String, String)> {
-    usage
+    let mut rows: Vec<(String, String)> = usage
         .limits
         .iter()
         .map(|limit| {
@@ -683,7 +775,14 @@ fn usage_rows(usage: &ProviderUsage) -> Vec<(String, String)> {
             }
             (limit.label.clone(), value)
         })
-        .collect()
+        .collect();
+    if usage.stale {
+        rows.push((
+            "Session".into(),
+            "expirée · données périmées (relancez /login)".into(),
+        ));
+    }
+    rows
 }
 
 fn provider_label(provider: &str) -> &str {

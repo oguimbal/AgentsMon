@@ -1,10 +1,19 @@
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
+
+#[cfg(target_os = "macos")]
+use std::io::Write;
+#[cfg(target_os = "macos")]
+use std::process::{Command, Stdio};
 
 use agentsmon_core::{
     AgentId, AgentSnapshot, AgentState, ContextUsage, FocusTarget, ProviderUsage, UsageLimit,
 };
+#[cfg(target_os = "macos")]
+use anyhow::bail;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use crossbeam_channel::{bounded, Receiver};
@@ -66,6 +75,13 @@ impl CStatusRecord {
         if self.event == "Stop" && self.state == "waiting" {
             return AgentState::Idle;
         }
+        // Claude Status 2.x can classify a completed assistant response as a
+        // question and leave it waiting indefinitely because it has no Stop
+        // hook. Only explicit lifecycle events should represent actionable
+        // input; AgentsMon's own hooks cover those events going forward.
+        if self.event == "assistant" && self.state == "waiting" {
+            return AgentState::Idle;
+        }
         match self.state.as_str() {
             "active" => AgentState::Active,
             "waiting" => AgentState::Waiting,
@@ -98,17 +114,22 @@ impl ProviderWatcher {
 
 pub struct ClaudeProvider {
     root: PathBuf,
+    usage_cache: Arc<Mutex<UsageCache>>,
 }
 
 impl ClaudeProvider {
     pub fn new() -> Self {
         Self {
             root: default_projects_root(),
+            usage_cache: Arc::default(),
         }
     }
 
     pub fn with_root(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            usage_cache: Arc::default(),
+        }
     }
 
     fn scan_files(&self) -> Result<Vec<PathBuf>> {
@@ -153,24 +174,30 @@ impl AgentProvider for ClaudeProvider {
     }
 
     fn discover(&self) -> Result<Vec<AgentSnapshot>> {
-        let mut system = System::new();
-        system.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::nothing()
-                .with_cmd(UpdateKind::OnlyIfNotSet)
-                .with_exe(UpdateKind::OnlyIfNotSet),
+        let records = prefer_agentsmon_records(
+            self.scan_files()?
+                .into_iter()
+                .filter_map(|file| match Self::parse_file(&file) {
+                    Ok(record) => {
+                        let last_activity = record.last_activity(&file);
+                        Some((file, record, last_activity))
+                    }
+                    Err(error) => {
+                        tracing::debug!(%error, "ignore incomplete cstatus write");
+                        None
+                    }
+                })
+                .collect(),
         );
+        let mut system = System::new();
+        let seed_pids: Vec<_> = records
+            .iter()
+            .flat_map(|(record, _)| [Some(record.pid), Some(record.ppid), record.focused_app_pid])
+            .flatten()
+            .collect();
+        refresh_process_trees(&mut system, &seed_pids);
         let mut snapshots = Vec::new();
-        for file in self.scan_files()? {
-            let record = match Self::parse_file(&file) {
-                Ok(record) => record,
-                Err(error) => {
-                    tracing::debug!(%error, "ignore incomplete cstatus write");
-                    continue;
-                }
-            };
-            let last_activity = record.last_activity(&file);
+        for (record, last_activity) in records {
             if !is_claude_process(&system, record.pid, last_activity) {
                 continue;
             }
@@ -178,8 +205,13 @@ impl AgentProvider for ClaudeProvider {
             let (host_pid, detected_host_app) =
                 find_host(&system, record.pid, record.ppid, record.focused_app_pid);
             let state = record.state();
+            let uri = focus_uri(
+                record.host_app.as_deref(),
+                detected_host_app.as_deref(),
+                &cwd,
+                &record.session_id,
+            );
             let host_app = record.host_app.or(detected_host_app);
-            let uri = focus_uri(&host_app, &cwd, &record.session_id);
             snapshots.push(AgentSnapshot {
                 id: AgentId::new(self.id(), record.session_id),
                 pid: record.pid,
@@ -187,7 +219,9 @@ impl AgentProvider for ClaudeProvider {
                 cwd,
                 state,
                 context_usage: record.context_used_percentage.and_then(ContextUsage::new),
-                provider_usage: record.rate_limits.as_ref().and_then(provider_usage),
+                // Provider-wide usage is fetched once from Claude's OAuth
+                // endpoint and attached by the application refresh.
+                provider_usage: None,
                 focus_target: FocusTarget {
                     host_pid,
                     host_app,
@@ -204,16 +238,43 @@ impl AgentProvider for ClaudeProvider {
     }
 
     fn usage(&self) -> Result<Option<ProviderUsage>> {
-        Ok(self
-            .scan_files()?
-            .into_iter()
-            .filter_map(|path| {
-                let record = Self::parse_file(&path).ok()?;
-                let usage = record.rate_limits.as_ref().and_then(provider_usage)?;
-                Some((record.last_activity(&path), usage))
-            })
-            .max_by_key(|(last_activity, _)| *last_activity)
-            .map(|(_, usage)| usage))
+        // Runs on the UI thread inside a refresh: never block on the network
+        // here. Serve the cache and refetch on a background thread when stale.
+        let mut cache = self
+            .usage_cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Claude usage cache poisoned"))?;
+        let fresh = cache
+            .fetched_at
+            .is_some_and(|instant| instant.elapsed() < Duration::from_secs(60));
+        if !fresh && !cache.fetching {
+            cache.fetching = true;
+            let shared = Arc::clone(&self.usage_cache);
+            if let Err(error) = std::thread::Builder::new()
+                .name("agentsmon-claude-usage".into())
+                .spawn(move || {
+                    let fetched = fetch_claude_usage();
+                    let Ok(mut cache) = shared.lock() else {
+                        return;
+                    };
+                    cache.fetching = false;
+                    cache.fetched_at = Some(Instant::now());
+                    match fetched {
+                        Ok(usage) => cache.usage = usage,
+                        Err(error) => {
+                            tracing::debug!(%error, "keep stale Claude usage after refresh failure");
+                            if let Some(usage) = cache.usage.as_mut() {
+                                usage.stale = true;
+                            }
+                        }
+                    }
+                })
+            {
+                cache.fetching = false;
+                tracing::warn!(%error, "spawn Claude usage refresh");
+            }
+        }
+        Ok(cache.usage.clone())
     }
 
     fn focus(&self, target: &FocusTarget) -> Result<()> {
@@ -241,28 +302,198 @@ impl AgentProvider for ClaudeProvider {
     }
 }
 
-fn provider_usage(rate_limits: &ClaudeRateLimits) -> Option<ProviderUsage> {
-    let limits = [
-        ("Quota 5 heures", Some(300), rate_limits.five_hour.as_ref()),
-        (
-            "Quota 7 jours",
-            Some(10_080),
-            rate_limits.seven_day.as_ref(),
-        ),
-    ]
-    .into_iter()
-    .filter_map(|(label, window_minutes, window)| {
-        let window = window?;
-        let resets_at = window
-            .resets_at
-            .and_then(|timestamp| u64::try_from(timestamp).ok())
-            .and_then(|timestamp| {
-                SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(timestamp))
-            });
-        UsageLimit::new(label, window.used_percentage, window_minutes, resets_at)
-    })
-    .collect();
-    let usage = ProviderUsage { limits, plan: None };
+#[derive(Default)]
+struct UsageCache {
+    fetched_at: Option<Instant>,
+    fetching: bool,
+    usage: Option<ProviderUsage>,
+}
+
+fn prefer_agentsmon_records(
+    records: Vec<(PathBuf, CStatusRecord, SystemTime)>,
+) -> Vec<(CStatusRecord, SystemTime)> {
+    let mut selected = HashMap::<String, (bool, CStatusRecord, SystemTime)>::new();
+    for (path, record, last_activity) in records {
+        let owned = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".agentsmon.cstatus"));
+        let replace =
+            selected
+                .get(&record.session_id)
+                .is_none_or(|(current_owned, _, current_activity)| {
+                    (owned && !current_owned)
+                        || (owned == *current_owned && last_activity > *current_activity)
+                });
+        if replace {
+            selected.insert(record.session_id.clone(), (owned, record, last_activity));
+        }
+    }
+    selected
+        .into_values()
+        .map(|(_, record, last_activity)| (record, last_activity))
+        .collect()
+}
+
+fn refresh_process_trees(system: &mut System, seeds: &[i32]) {
+    let refresh_kind = ProcessRefreshKind::nothing()
+        .with_cmd(UpdateKind::OnlyIfNotSet)
+        .with_exe(UpdateKind::OnlyIfNotSet);
+    let mut seen = HashSet::new();
+    let mut frontier: Vec<_> = seeds
+        .iter()
+        .copied()
+        .filter(|pid| *pid > 1)
+        .map(|pid| Pid::from_u32(pid as u32))
+        .filter(|pid| seen.insert(*pid))
+        .collect();
+    for _ in 0..10 {
+        if frontier.is_empty() {
+            break;
+        }
+        system.refresh_processes_specifics(ProcessesToUpdate::Some(&frontier), false, refresh_kind);
+        frontier = frontier
+            .iter()
+            .filter_map(|pid| system.process(*pid)?.parent())
+            .filter(|pid| pid.as_u32() > 1 && seen.insert(*pid))
+            .collect();
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaudeUsageResponse {
+    #[serde(default)]
+    limits: Vec<ClaudeUsageLimit>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaudeUsageLimit {
+    kind: String,
+    group: String,
+    percent: f32,
+    #[serde(default)]
+    resets_at: Option<String>,
+    #[serde(default)]
+    scope: Option<ClaudeUsageScope>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaudeUsageScope {
+    #[serde(default)]
+    model: Option<ClaudeUsageModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaudeUsageModel {
+    #[serde(default)]
+    display_name: Option<String>,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Deserialize)]
+struct ClaudeCredentialEnvelope {
+    #[serde(rename = "claudeAiOauth")]
+    claude_ai_oauth: ClaudeOAuthCredential,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Deserialize)]
+struct ClaudeOAuthCredential {
+    #[serde(rename = "accessToken")]
+    access_token: String,
+}
+
+#[cfg(target_os = "macos")]
+fn fetch_claude_usage() -> Result<Option<ProviderUsage>> {
+    let credential = Command::new("/usr/bin/security")
+        .args([
+            "find-generic-password",
+            "-s",
+            "Claude Code-credentials",
+            "-w",
+        ])
+        .output()
+        .context("read Claude OAuth credential from macOS Keychain")?;
+    if !credential.status.success() {
+        bail!("Claude OAuth credential is unavailable");
+    }
+    let credential: ClaudeCredentialEnvelope =
+        serde_json::from_slice(&credential.stdout).context("parse Claude OAuth credential")?;
+    if credential.claude_ai_oauth.access_token.is_empty() {
+        bail!("Claude OAuth credential has no access token");
+    }
+
+    let mut child = Command::new("/usr/bin/curl")
+        .args([
+            "--silent",
+            "--show-error",
+            "--fail-with-body",
+            "--max-time",
+            "3",
+            "--header",
+            "@-",
+            "https://api.anthropic.com/api/oauth/usage",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("start Claude usage request")?;
+    {
+        let mut stdin = child.stdin.take().context("open Claude usage request")?;
+        writeln!(
+            stdin,
+            "Authorization: Bearer {}",
+            credential.claude_ai_oauth.access_token
+        )?;
+        writeln!(stdin, "anthropic-beta: oauth-2025-04-20")?;
+        writeln!(stdin, "accept: application/json")?;
+    }
+    let output = child.wait_with_output().context("wait for Claude usage")?;
+    if !output.status.success() {
+        bail!("Claude usage endpoint returned {}", output.status);
+    }
+    let response: ClaudeUsageResponse =
+        serde_json::from_slice(&output.stdout).context("parse Claude usage response")?;
+    Ok(provider_usage_from_api(response))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn fetch_claude_usage() -> Result<Option<ProviderUsage>> {
+    Ok(None)
+}
+
+fn provider_usage_from_api(response: ClaudeUsageResponse) -> Option<ProviderUsage> {
+    let limits = response
+        .limits
+        .into_iter()
+        .filter_map(|limit| {
+            let (label, window_minutes) = match (limit.kind.as_str(), limit.group.as_str()) {
+                ("session", _) => ("Quota 5 heures".to_string(), Some(300)),
+                ("weekly_all", _) => ("Quota 7 jours".to_string(), Some(10_080)),
+                ("weekly_scoped", _) => {
+                    let scope = limit
+                        .scope
+                        .and_then(|scope| scope.model)
+                        .and_then(|model| model.display_name)
+                        .unwrap_or_else(|| "modèle".into());
+                    (format!("Quota 7 jours · {scope}"), Some(10_080))
+                }
+                _ => return None,
+            };
+            let resets_at = limit
+                .resets_at
+                .as_deref()
+                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                .map(|value| value.with_timezone(&Utc).into());
+            UsageLimit::new(label, limit.percent, window_minutes, resets_at)
+        })
+        .collect();
+    let usage = ProviderUsage {
+        limits,
+        plan: None,
+        stale: false,
+    };
     (!usage.is_empty()).then_some(usage)
 }
 
@@ -358,13 +589,31 @@ fn find_host(
     (candidate, None)
 }
 
-fn focus_uri(host_app: &Option<String>, cwd: &Path, session_id: &str) -> Option<String> {
-    let host = host_app.as_deref()?.to_ascii_lowercase();
-    if host.contains("visual studio code") {
+fn focus_uri(
+    reported_host: Option<&str>,
+    detected_host: Option<&str>,
+    cwd: &Path,
+    session_id: &str,
+) -> Option<String> {
+    let reported = reported_host.map(str::to_ascii_lowercase);
+    let detected = detected_host.map(str::to_ascii_lowercase);
+    let any_contains = |needle: &str| {
+        reported.as_deref().is_some_and(|host| host.contains(needle))
+            || detected.as_deref().is_some_and(|host| host.contains(needle))
+    };
+    let directory_uri = |scheme: &str| {
         let file_url = url::Url::from_directory_path(cwd).ok()?.to_string();
-        return Some(file_url.replacen("file://", "vscode://file", 1));
+        Some(file_url.replacen("file://", scheme, 1))
+    };
+    // Cursor's integrated terminal also reports TERM_PROGRAM=vscode, so the
+    // detected executable path must win before any VS Code match.
+    if any_contains("cursor") {
+        return directory_uri("cursor://file");
     }
-    if host.contains("claude.app") {
+    if any_contains("visual studio code") || any_contains("vscode") {
+        return directory_uri("vscode://file");
+    }
+    if any_contains("claude.app") {
         return Some(format!("claude://resume?session={session_id}"));
     }
     None
@@ -384,40 +633,26 @@ mod tests {
     }
 
     #[test]
-    fn maps_subscription_rate_limits() {
-        let limits = ClaudeRateLimits {
-            five_hour: Some(ClaudeRateLimitWindow {
-                used_percentage: 35.0,
-                resets_at: Some(1_784_200_000),
-            }),
-            seven_day: Some(ClaudeRateLimitWindow {
-                used_percentage: 74.0,
-                resets_at: None,
-            }),
-        };
-        let usage = provider_usage(&limits).unwrap();
-        assert_eq!(usage.highest_used_percentage(), Some(74.0));
-        assert_eq!(usage.limits[0].window_minutes, Some(300));
-        assert_eq!(usage.limits[1].window_minutes, Some(10_080));
-    }
-
-    #[test]
-    fn exposes_the_latest_quota_without_a_live_session() {
-        let directory = tempfile::tempdir().unwrap();
-        let project = directory.path().join("project");
-        fs::create_dir(&project).unwrap();
-        fs::write(
-            project.join("stopped.cstatus"),
-            r#"{"session_id":"stopped","pid":999999,"state":"idle","timestamp":"2026-07-16T10:00:00Z","rate_limits":{"five_hour":{"used_percentage":37.0}}}"#,
+    fn maps_authoritative_oauth_usage_windows() {
+        let response: ClaudeUsageResponse = serde_json::from_str(
+            r#"{
+                "limits": [
+                    {"kind":"session","group":"session","percent":3,"resets_at":"2026-07-24T18:00:00Z","scope":null},
+                    {"kind":"weekly_all","group":"weekly","percent":20,"resets_at":"2026-07-24T21:00:00Z","scope":null},
+                    {"kind":"weekly_scoped","group":"weekly","percent":36,"resets_at":"2026-07-24T21:00:00Z","scope":{"model":{"display_name":"Fable"}}}
+                ]
+            }"#,
         )
         .unwrap();
+        let usage = provider_usage_from_api(response).unwrap();
 
-        let provider = ClaudeProvider::with_root(directory.path().to_path_buf());
-        assert!(provider.discover().unwrap().is_empty());
-        assert_eq!(
-            provider.usage().unwrap().unwrap().highest_used_percentage(),
-            Some(37.0)
-        );
+        assert_eq!(usage.limits.len(), 3);
+        assert_eq!(usage.limits[0].label, "Quota 5 heures");
+        assert_eq!(usage.limits[0].used_percentage(), 3.0);
+        assert_eq!(usage.limits[1].label, "Quota 7 jours");
+        assert_eq!(usage.limits[1].used_percentage(), 20.0);
+        assert_eq!(usage.limits[2].label, "Quota 7 jours · Fable");
+        assert_eq!(usage.limits[2].used_percentage(), 36.0);
     }
 
     #[test]
@@ -429,6 +664,42 @@ mod tests {
         assert_eq!(record.state(), AgentState::Idle);
         record.state = "waiting".into();
         assert_eq!(record.state(), AgentState::Waiting);
+    }
+
+    #[test]
+    fn legacy_assistant_question_is_a_completed_turn() {
+        let record: CStatusRecord = serde_json::from_str(
+            r#"{"session_id":"s","pid":42,"state":"waiting","activity":"question","event":"assistant","timestamp":"2026-07-16T10:00:00Z"}"#,
+        )
+        .unwrap();
+        assert_eq!(record.state(), AgentState::Idle);
+    }
+
+    #[test]
+    fn agentsmon_record_wins_over_a_later_compatible_plugin_write() {
+        let compatible: CStatusRecord = serde_json::from_str(
+            r#"{"session_id":"s","pid":42,"state":"active","activity":"Bash","event":"assistant","timestamp":"2026-07-16T10:00:02Z"}"#,
+        )
+        .unwrap();
+        let owned: CStatusRecord = serde_json::from_str(
+            r#"{"session_id":"s","pid":42,"state":"waiting","activity":"input","event":"PermissionRequest","timestamp":"2026-07-16T10:00:01Z"}"#,
+        )
+        .unwrap();
+        let selected = prefer_agentsmon_records(vec![
+            (
+                PathBuf::from("/tmp/s.cstatus"),
+                compatible,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(2),
+            ),
+            (
+                PathBuf::from("/tmp/s.agentsmon.cstatus"),
+                owned,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+            ),
+        ]);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].0.state(), AgentState::Waiting);
+        assert_eq!(selected[0].0.event, "PermissionRequest");
     }
 
     #[test]
@@ -454,21 +725,39 @@ mod tests {
     fn builds_supported_desktop_focus_uris() {
         let cwd = Path::new("/tmp/project with spaces");
         let vscode = focus_uri(
-            &Some("/Applications/Visual Studio Code.app/Contents/MacOS/Electron".into()),
+            None,
+            Some("/Applications/Visual Studio Code.app/Contents/MacOS/Electron"),
             cwd,
             "session",
         )
         .unwrap();
         assert_eq!(vscode, "vscode://file/tmp/project%20with%20spaces/");
+        // VSCode's integrated terminal reports TERM_PROGRAM=vscode.
+        assert_eq!(
+            focus_uri(Some("vscode"), None, cwd, "session").as_deref(),
+            Some("vscode://file/tmp/project%20with%20spaces/")
+        );
+        // Cursor reports TERM_PROGRAM=vscode too; the detected executable wins.
         assert_eq!(
             focus_uri(
-                &Some("/Applications/Claude.app/Contents/MacOS/Claude".into()),
+                Some("vscode"),
+                Some("/Applications/Cursor.app/Contents/MacOS/Cursor"),
+                cwd,
+                "session"
+            )
+            .as_deref(),
+            Some("cursor://file/tmp/project%20with%20spaces/")
+        );
+        assert_eq!(
+            focus_uri(
+                None,
+                Some("/Applications/Claude.app/Contents/MacOS/Claude"),
                 cwd,
                 "session-id"
             )
             .as_deref(),
             Some("claude://resume?session=session-id")
         );
-        assert!(focus_uri(&Some("Warp".into()), cwd, "session").is_none());
+        assert!(focus_uri(Some("Warp"), None, cwd, "session").is_none());
     }
 }
