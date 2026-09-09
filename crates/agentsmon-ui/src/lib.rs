@@ -787,11 +787,13 @@ pub fn agent_details_height(agent: &AgentSnapshot) -> f32 {
 
 /// Height of the provider details popup for the same layout.
 pub fn provider_details_height(provider: &ProviderStatus) -> f32 {
-    let lines = match &provider.usage {
+    // Provider name and the "Utilisation du provider" line, then one row per
+    // quota window (or the placeholder row).
+    let lines = 2 + match &provider.usage {
         Some(usage) => {
-            1 + usage.limits.len() + usize::from(usage.plan.is_some()) + usize::from(usage.stale)
+            usage.limits.len() + usize::from(usage.plan.is_some()) + usize::from(usage.stale)
         }
-        None => 2,
+        None => 1,
     };
     details_height(lines)
 }
@@ -1203,6 +1205,24 @@ mod tests {
         });
         // Seven rows with the placeholder quota row, nine with three windows.
         assert!((agent_details_height(&agent) - titled - 2.0 * (11.0 * 1.618 + 5.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn provider_details_height_counts_header_lines() {
+        let usage = ProviderUsage {
+            limits: vec![
+                UsageLimit::new("5 h", 1.0, None, None).unwrap(),
+                UsageLimit::new("7 j", 1.0, None, None).unwrap(),
+                UsageLimit::new("7 j · Fable", 1.0, None, None).unwrap(),
+            ],
+            plan: None,
+            stale: false,
+        };
+        let three = provider_details_height(&ProviderStatus::new("claude", Some(usage)));
+        let none = provider_details_height(&ProviderStatus::new("claude", None));
+        // Five lines with three windows, three with the placeholder row.
+        assert!((three - none - 2.0 * (11.0 * 1.618 + 5.0)).abs() < 0.01);
+        assert!(none > 3.0 * 11.0 * 1.618);
     }
 
     #[test]
