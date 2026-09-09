@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 use agentsmon_core::{AgentStore, ProviderStatus};
 use agentsmon_providers::{AgentProvider, ClaudeProvider, CodexProvider, ProviderWatcher};
 use agentsmon_ui::{
-    natural_width, AgentDetailsView, MonitorEvent, MonitorView, ProviderDetailsView,
+    agent_details_height, natural_width, provider_details_height, AgentDetailsView, MonitorEvent,
+    MonitorView, ProviderDetailsView,
 };
 use gpui::{
     actions, point, px, size, AnyWindowHandle, App, AppContext, AsyncApp, Bounds, DisplayId,
@@ -21,7 +22,6 @@ actions!(agentsmon, [Quit, ShowBars, Diagnostics]);
 const BAR_HEIGHT: f32 = 23.0;
 const SCREEN_INSET: f32 = 0.0;
 const DETAILS_WIDTH: f32 = 400.0;
-const DETAILS_HEIGHT: f32 = 176.0;
 const DETAILS_GAP: f32 = 6.0;
 const WATCHED_POLL_INTERVAL: Duration = Duration::from_secs(10);
 const FALLBACK_POLL_INTERVAL: Duration = Duration::from_secs(3);
@@ -421,15 +421,16 @@ fn open_details(
     let max_x =
         (display_bounds.origin.x + display_bounds.size.width).as_f32() - DETAILS_WIDTH - 6.0;
     let x = (panel_x + anchor_x - DETAILS_WIDTH / 2.0).clamp(min_x, max_x.max(min_x));
+    let height = agent_details_height(&agent);
     let y = (display_bounds.origin.y + display_bounds.size.height).as_f32()
         - BAR_HEIGHT
         - DETAILS_GAP
-        - DETAILS_HEIGHT;
+        - height;
     let options = WindowOptions {
         titlebar: None,
         window_bounds: Some(WindowBounds::Windowed(Bounds {
             origin: point(px(x), px(y)),
-            size: size(px(DETAILS_WIDTH), px(DETAILS_HEIGHT)),
+            size: size(px(DETAILS_WIDTH), px(height)),
         })),
         kind: WindowKind::PopUp,
         is_movable: false,
@@ -467,15 +468,16 @@ fn open_provider_details(
     let max_x =
         (display_bounds.origin.x + display_bounds.size.width).as_f32() - DETAILS_WIDTH - 6.0;
     let x = (panel_x + anchor_x - DETAILS_WIDTH / 2.0).clamp(min_x, max_x.max(min_x));
+    let height = provider_details_height(&provider);
     let y = (display_bounds.origin.y + display_bounds.size.height).as_f32()
         - BAR_HEIGHT
         - DETAILS_GAP
-        - DETAILS_HEIGHT;
+        - height;
     let options = WindowOptions {
         titlebar: None,
         window_bounds: Some(WindowBounds::Windowed(Bounds {
             origin: point(px(x), px(y)),
-            size: size(px(DETAILS_WIDTH), px(DETAILS_HEIGHT)),
+            size: size(px(DETAILS_WIDTH), px(height)),
         })),
         kind: WindowKind::PopUp,
         is_movable: false,

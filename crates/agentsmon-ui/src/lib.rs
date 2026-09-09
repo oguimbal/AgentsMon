@@ -741,9 +741,19 @@ impl Render for AgentDetailsView {
             .text_size(px(11.0))
             .text_color(rgb(0xf4f4f5))
             .child(
+                // The card under the pointer already shows the project name;
+                // the conversation title is the information the popup adds.
                 div()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child(agent.project_name.clone()),
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(
+                        agent
+                            .title
+                            .clone()
+                            .unwrap_or_else(|| agent.project_name.clone()),
+                    ),
             )
             .child(div().text_color(rgb(0xb9bbc3)).child(path))
             .children(rows.into_iter().map(|(label, value)| {
@@ -759,6 +769,41 @@ impl Render for AgentDetailsView {
                     .child(div().child(value))
             }))
     }
+}
+
+/// Height of the agent details popup: one line per rendered row plus the
+/// container padding, so a title or an extra quota window is never clipped.
+pub fn agent_details_height(agent: &AgentSnapshot) -> f32 {
+    let usage_lines = match &agent.provider_usage {
+        Some(usage) => {
+            usage.limits.len() + usize::from(usage.plan.is_some()) + usize::from(usage.stale)
+        }
+        None => 1,
+    };
+    // Title, path, provider, state, context.
+    let lines = 5 + usage_lines;
+    details_height(lines)
+}
+
+/// Height of the provider details popup for the same layout.
+pub fn provider_details_height(provider: &ProviderStatus) -> f32 {
+    let lines = match &provider.usage {
+        Some(usage) => {
+            1 + usage.limits.len() + usize::from(usage.plan.is_some()) + usize::from(usage.stale)
+        }
+        None => 2,
+    };
+    details_height(lines)
+}
+
+fn details_height(lines: usize) -> f32 {
+    // Vertical padding of the container, GPUI's default line height (phi times
+    // the 11 px text size) and the column gap, plus a little slack for rounding.
+    const PADDING: f32 = 14.0;
+    const LINE: f32 = 11.0 * 1.618;
+    const GAP: f32 = 5.0;
+    const SLACK: f32 = 4.0;
+    PADDING + lines as f32 * LINE + lines.saturating_sub(1) as f32 * GAP + SLACK
 }
 
 fn usage_rows(usage: &ProviderUsage) -> Vec<(String, String)> {
@@ -1108,6 +1153,7 @@ mod tests {
             pid: 1,
             cwd: format!("/tmp/{id}").into(),
             project_name: id.into(),
+            title: None,
             state: AgentState::Active,
             context_usage: None,
             provider_usage: None,
@@ -1124,6 +1170,7 @@ mod tests {
             pid: 1,
             cwd: "/tmp/very-long-project".into(),
             project_name: "x".repeat(100),
+            title: None,
             state: AgentState::Active,
             context_usage: None,
             provider_usage: None,
@@ -1136,6 +1183,26 @@ mod tests {
         );
         snapshot.project_name = "a".into();
         assert!(natural_width(&[snapshot], &[], 500.0) >= 76.0);
+    }
+
+    #[test]
+    fn details_height_grows_with_quota_rows() {
+        let mut agent = snapshot("a");
+        let bare = agent_details_height(&agent);
+        agent.title = Some("Fix the build".into());
+        let titled = agent_details_height(&agent);
+        assert_eq!(titled, bare);
+        agent.provider_usage = Some(ProviderUsage {
+            limits: vec![
+                UsageLimit::new("5 h", 1.0, None, None).unwrap(),
+                UsageLimit::new("7 j", 1.0, None, None).unwrap(),
+                UsageLimit::new("7 j · Fable", 1.0, None, None).unwrap(),
+            ],
+            plan: None,
+            stale: false,
+        });
+        // Seven rows with the placeholder quota row, nine with three windows.
+        assert!((agent_details_height(&agent) - titled - 2.0 * (11.0 * 1.618 + 5.0)).abs() < 0.01);
     }
 
     #[test]

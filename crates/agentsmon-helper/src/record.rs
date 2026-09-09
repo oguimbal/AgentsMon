@@ -31,6 +31,9 @@ struct StatusRecord {
     tmux_socket: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     focused_app_pid: Option<i32>,
+    /// Conversation title assigned by Claude Code or chosen with `/rename`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,6 +61,7 @@ pub struct RecordUpdate<'a> {
     pub event: &'a str,
     pub context_percentage: Option<f32>,
     pub rate_limits: Option<ClaudeRateLimits>,
+    pub title: Option<String>,
 }
 
 pub fn path_from_transcript(transcript: &str, session_id: &str) -> Result<PathBuf> {
@@ -146,6 +150,9 @@ pub fn merge_record(path: &Path, update: RecordUpdate<'_>) -> Result<()> {
         } else {
             previous.as_ref().and_then(|r| r.focused_app_pid)
         },
+        title: update
+            .title
+            .or_else(|| previous.as_ref().and_then(|r| r.title.clone())),
     };
 
     let temp = path.with_extension(format!("cstatus.tmp.{}", std::process::id()));
@@ -325,6 +332,7 @@ mod tests {
             event: "test",
             context_percentage: percentage,
             rate_limits: None,
+            title: None,
         }
     }
 
@@ -333,12 +341,20 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("session.cstatus");
         fs::write(&path, b"{partial").unwrap();
-        merge_record(&path, update(Some(68.5))).unwrap();
+        merge_record(
+            &path,
+            RecordUpdate {
+                title: Some("Fix the build".into()),
+                ..update(Some(68.5))
+            },
+        )
+        .unwrap();
         merge_record(&path, update(None)).unwrap();
 
         let record: StatusRecord = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
         assert_eq!(record.context_used_percentage, Some(68.5));
         assert_eq!(record.cwd, "/tmp/project");
+        assert_eq!(record.title.as_deref(), Some("Fix the build"));
     }
 
     #[test]

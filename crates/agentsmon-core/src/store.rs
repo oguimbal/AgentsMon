@@ -80,6 +80,7 @@ mod tests {
             pid: 10,
             cwd: PathBuf::from(format!("/tmp/{id}")),
             project_name: id.into(),
+            title: None,
             state: AgentState::Idle,
             context_usage: None,
             provider_usage: None,

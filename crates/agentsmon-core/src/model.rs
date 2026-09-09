@@ -125,6 +125,10 @@ pub struct AgentSnapshot {
     pub pid: i32,
     pub cwd: PathBuf,
     pub project_name: String,
+    /// Conversation title chosen by the agent (or renamed by the user).
+    /// Metadata only: never derived from message text by AgentsMon.
+    #[serde(default)]
+    pub title: Option<String>,
     pub state: AgentState,
     pub context_usage: Option<ContextUsage>,
     pub provider_usage: Option<ProviderUsage>,

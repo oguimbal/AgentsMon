@@ -51,6 +51,8 @@ pub struct CStatusRecord {
     pub tmux_socket: Option<String>,
     #[serde(default)]
     pub focused_app_pid: Option<i32>,
+    #[serde(default)]
+    pub title: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,6 +218,7 @@ impl AgentProvider for ClaudeProvider {
                 id: AgentId::new(self.id(), record.session_id),
                 pid: record.pid,
                 project_name: AgentSnapshot::project_name(&cwd),
+                title: record.title,
                 cwd,
                 state,
                 context_usage: record.context_used_percentage.and_then(ContextUsage::new),
@@ -598,8 +601,12 @@ fn focus_uri(
     let reported = reported_host.map(str::to_ascii_lowercase);
     let detected = detected_host.map(str::to_ascii_lowercase);
     let any_contains = |needle: &str| {
-        reported.as_deref().is_some_and(|host| host.contains(needle))
-            || detected.as_deref().is_some_and(|host| host.contains(needle))
+        reported
+            .as_deref()
+            .is_some_and(|host| host.contains(needle))
+            || detected
+                .as_deref()
+                .is_some_and(|host| host.contains(needle))
     };
     let directory_uri = |scheme: &str| {
         let file_url = url::Url::from_directory_path(cwd).ok()?.to_string();
@@ -626,10 +633,11 @@ mod tests {
     #[test]
     fn parses_compatible_record_and_maps_states() {
         let record: CStatusRecord = serde_json::from_str(
-            r#"{"session_id":"s","pid":42,"state":"compacting","timestamp":"2026-07-16T10:00:00Z","cwd":"/tmp/demo","context_used_percentage":68.5}"#,
+            r#"{"session_id":"s","pid":42,"state":"compacting","timestamp":"2026-07-16T10:00:00Z","cwd":"/tmp/demo","context_used_percentage":68.5,"title":"Fix the build"}"#,
         ).unwrap();
         assert_eq!(record.state(), AgentState::Compacting);
         assert_eq!(record.context_used_percentage, Some(68.5));
+        assert_eq!(record.title.as_deref(), Some("Fix the build"));
     }
 
     #[test]

@@ -17,7 +17,7 @@ claude plugin validate .
 - `agentsmon-core` must remain pure Rust and provider/OS independent.
 - New agents implement `AgentProvider`; do not add provider conditionals to `MonitorView`.
 - Session order and hidden IDs are deliberately in-memory only.
-- Never read or persist conversation content. Claude integration may consume hook metadata, status-line context metrics, and transcript token counters (`usage` numbers only — never message text).
+- Never read or persist conversation content. Claude integration may consume hook metadata, status-line context metrics, transcript token counters (`usage` numbers only — never message text) and the session title lines Claude Code writes to the transcript (`ai-title` / `custom-title`). Codex integration may read the thread name from `~/.codex/session_index.jsonl`, never the `threads.title` column of Codex's SQLite state, which holds the first user message.
 - Preserve an existing Claude `statusLine` exactly and restore it only if AgentsMon still owns the setting.
 - UI state changes must be broadcast to every display panel.
 - Keep the no-tray product decision. The normal Dock/taskbar application presence is intentional.

@@ -57,6 +57,9 @@ fn process_hook(input: &[u8]) -> Result<()> {
 
     let (state, activity) = event_state(&hook);
     let (pid, ppid) = record::claude_process_ids();
+    // Sessions without a status line (VS Code, claude.ai) only learn their
+    // context usage from the transcript tail, which also carries the title.
+    let transcript = transcript::inspect(&hook.transcript_path);
     record::merge_record(
         &path,
         record::RecordUpdate {
@@ -67,10 +70,9 @@ fn process_hook(input: &[u8]) -> Result<()> {
             event: &hook.hook_event_name,
             state,
             activity,
-            // Sessions without a status line (VS Code, claude.ai) only learn
-            // their context usage from the transcript tail.
-            context_percentage: transcript::context_percentage(&hook.transcript_path),
+            context_percentage: transcript.context_percentage,
             rate_limits: None,
+            title: transcript.title,
         },
     )
 }

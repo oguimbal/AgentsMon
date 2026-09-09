@@ -35,6 +35,8 @@ pub struct CodexStatusRecord {
     pub context_used_percentage: Option<f32>,
     #[serde(default)]
     pub rate_limits: Option<CodexRateLimits>,
+    #[serde(default)]
+    pub title: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -201,6 +203,7 @@ impl AgentProvider for CodexProvider {
                 id: AgentId::new(self.id(), &record.session_id),
                 pid: record.pid,
                 project_name: AgentSnapshot::project_name(&cwd),
+                title: record.title.clone(),
                 cwd,
                 state: record.effective_state(last_activity, now),
                 context_usage: record.context_used_percentage.and_then(ContextUsage::new),
@@ -358,11 +361,12 @@ mod tests {
     #[test]
     fn parses_records_and_maps_states() {
         let record: CodexStatusRecord = serde_json::from_str(
-            r#"{"session_id":"s","pid":42,"state":"waiting","timestamp":"2026-07-16T10:00:00Z","cwd":"/tmp/demo","context_used_percentage":56.25}"#,
+            r#"{"session_id":"s","pid":42,"state":"waiting","timestamp":"2026-07-16T10:00:00Z","cwd":"/tmp/demo","context_used_percentage":56.25,"title":"Automatiser la signature"}"#,
         )
         .unwrap();
         assert_eq!(record.state(), AgentState::Waiting);
         assert_eq!(record.context_used_percentage, Some(56.25));
+        assert_eq!(record.title.as_deref(), Some("Automatiser la signature"));
 
         let stopped: CodexStatusRecord = serde_json::from_str(
             r#"{"session_id":"s","pid":42,"state":"waiting","event":"Stop","timestamp":"2026-07-16T10:00:00Z","cwd":"/tmp/demo"}"#,
