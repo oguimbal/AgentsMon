@@ -68,7 +68,13 @@ Uninstall restores the previous status line only while the configured command st
 
 AgentsMon adds idempotent user-level Codex lifecycle hooks while preserving every existing hook definition. Codex requires the user to review and trust new hooks before they run. New prompts, tools, approval requests, compaction and completed turns update the same provider-neutral session model used by Claude.
 
-The helper examines only Codex `token_count` metadata records to calculate context usage. It does not deserialize or store user and assistant messages. Clicking a Codex card opens the exact task through the native `codex://threads/<session-id>` deep link.
+The helper examines Codex `token_count` metadata records to calculate context usage. It does not deserialize or store user and assistant messages.
+
+Codex permission requests remain green for a three-second grace period. Only a request still pending at a later refresh becomes orange and can trigger an attention notification; short-lived requests never enter the shared waiting state. A genuine pending request appears after the grace period on the next refresh (normally within about 13 seconds of its hook), even if no further hook arrives. Other waiting states, completion, and compaction are not delayed.
+
+The provider also checks recent `task_started`, `task_complete`, and `turn_aborted` lifecycle metadata to recover missed completion hooks. Silent reasoning never expires on a timer; a newer completion or interruption ends the active state. Lifecycle checks run on the normal refresh cycle (at most 10 seconds), inspect at most the last 512 KiB, and decode only event types and timestamps. If the transcript is unavailable or contains no recent lifecycle marker, the last hook state remains authoritative until another event or process exit. Existing status records gain the transcript path on their next hook after updating the helper.
+
+Clicking a Codex card opens the exact task through the native `codex://threads/<session-id>` deep link.
 
 ## Workspace
 

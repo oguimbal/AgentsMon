@@ -32,6 +32,8 @@ struct CodexStatusRecord {
     timestamp: String,
     cwd: String,
     event: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    transcript_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     context_used_percentage: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -216,6 +218,11 @@ fn merge_record(
             hook.cwd.clone()
         },
         event: hook.hook_event_name.clone(),
+        transcript_path: hook.transcript_path.clone().or_else(|| {
+            previous
+                .as_ref()
+                .and_then(|record| record.transcript_path.clone())
+        }),
         context_used_percentage: merged_context_percentage(
             hook.hook_event_name.as_str(),
             metadata.context_percentage,
@@ -441,6 +448,62 @@ mod tests {
         assert_eq!(thread_name(&index, "ccc"), None);
         assert_eq!(thread_name(&index, "missing"), None);
         assert_eq!(thread_name(Path::new("/nonexistent"), "bbb"), None);
+    }
+
+    #[test]
+    fn retains_the_transcript_location_when_later_hooks_omit_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.json");
+        let mut hook = HookInput {
+            session_id: "session".into(),
+            transcript_path: Some("/tmp/rollout.jsonl".into()),
+            cwd: "/tmp/project".into(),
+            hook_event_name: "UserPromptSubmit".into(),
+            tool_name: None,
+        };
+        merge_record(
+            &path,
+            &hook,
+            42,
+            41,
+            "active",
+            String::new(),
+            SessionMetadata::default(),
+        )
+        .unwrap();
+        hook.transcript_path = None;
+        hook.hook_event_name = "PostToolUse".into();
+        merge_record(
+            &path,
+            &hook,
+            42,
+            41,
+            "active",
+            String::new(),
+            SessionMetadata::default(),
+        )
+        .unwrap();
+        let record: CodexStatusRecord = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            record.transcript_path.as_deref(),
+            Some("/tmp/rollout.jsonl")
+        );
+        hook.transcript_path = Some("/tmp/resumed.jsonl".into());
+        merge_record(
+            &path,
+            &hook,
+            42,
+            41,
+            "active",
+            String::new(),
+            SessionMetadata::default(),
+        )
+        .unwrap();
+        let record: CodexStatusRecord = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            record.transcript_path.as_deref(),
+            Some("/tmp/resumed.jsonl")
+        );
     }
 
     #[test]

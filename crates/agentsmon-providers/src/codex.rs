@@ -1,5 +1,6 @@
 use std::collections::HashSet;
-use std::fs;
+use std::fs::{self, File};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -15,7 +16,10 @@ use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 use crate::{focus, AgentProvider, ProviderWatcher};
 
 const MAX_RECORD_AGE: Duration = Duration::from_secs(24 * 60 * 60);
-const INTERRUPTED_ACTIVITY_GRACE: Duration = Duration::from_secs(15);
+const LIFECYCLE_TAIL_BYTES: u64 = 512 * 1024;
+// A permission hook alone does not establish a persistent need for attention.
+// Suppress brief requests before they reach either the panels or notifications.
+const PERMISSION_ATTENTION_GRACE: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodexStatusRecord {
@@ -31,6 +35,8 @@ pub struct CodexStatusRecord {
     pub cwd: String,
     #[serde(default)]
     pub event: String,
+    #[serde(default)]
+    pub transcript_path: Option<PathBuf>,
     #[serde(default)]
     pub context_used_percentage: Option<f32>,
     #[serde(default)]
@@ -75,7 +81,26 @@ impl CodexStatusRecord {
     }
 
     fn effective_state(&self, last_activity: SystemTime, now: SystemTime) -> AgentState {
-        settle_interrupted_activity(self.state(), &self.event, last_activity, now)
+        // Silence is normal while the model reasons. Only an explicit lifecycle
+        // event newer than the hook can supersede it (including waiting/tools).
+        self.transcript_path
+            .as_deref()
+            .and_then(|path| latest_lifecycle(path).ok().flatten())
+            .filter(|event| event.timestamp > last_activity)
+            .map_or_else(
+                || {
+                    if self.state() == AgentState::Waiting
+                        && self.event == "PermissionRequest"
+                        && now.duration_since(last_activity).unwrap_or_default()
+                            < PERMISSION_ATTENTION_GRACE
+                    {
+                        AgentState::Active
+                    } else {
+                        self.state()
+                    }
+                },
+                |event| event.state,
+            )
     }
 
     fn last_activity(&self, path: &Path) -> SystemTime {
@@ -303,21 +328,63 @@ fn provider_usage(rate_limits: &CodexRateLimits) -> Option<ProviderUsage> {
     (!usage.is_empty()).then_some(usage)
 }
 
-fn settle_interrupted_activity(
-    state: AgentState,
-    event: &str,
-    last_activity: SystemTime,
-    now: SystemTime,
-) -> AgentState {
-    if state != AgentState::Active || event == "PreToolUse" {
-        return state;
-    }
+/// Decode only the envelope timestamp and event discriminator. Serde skips all
+/// other fields, including final answers carried by task_complete. Never use a
+/// serde_json::Value here: it would deserialize conversation content.
+#[derive(Deserialize)]
+struct LifecycleEnvelope {
+    timestamp: String,
+    #[serde(rename = "type")]
+    kind: String,
+    payload: LifecyclePayload,
+}
 
-    if now.duration_since(last_activity).unwrap_or_default() >= INTERRUPTED_ACTIVITY_GRACE {
-        AgentState::Idle
-    } else {
-        state
+#[derive(Deserialize)]
+struct LifecyclePayload {
+    #[serde(rename = "type")]
+    kind: String,
+}
+
+struct LifecycleEvent {
+    timestamp: SystemTime,
+    state: AgentState,
+}
+
+fn latest_lifecycle(path: &Path) -> std::io::Result<Option<LifecycleEvent>> {
+    let mut file = File::open(path)?;
+    let length = file.metadata()?.len();
+    let start = length.saturating_sub(LIFECYCLE_TAIL_BYTES);
+    file.seek(SeekFrom::Start(start))?;
+    let mut tail = Vec::new();
+    // Bound the read even if Codex appends while we inspect the file.
+    file.take(length - start).read_to_end(&mut tail)?;
+    let mut lines = tail.split(|byte| *byte == b'\n');
+    if start > 0 {
+        let _ = lines.next(); // The first line may be truncated.
     }
+    // A writer may be midway through a JSON record; wait for its newline.
+    let _ = lines.next_back();
+    for line in lines.rev() {
+        let Ok(envelope) = serde_json::from_slice::<LifecycleEnvelope>(line) else {
+            continue;
+        };
+        if envelope.kind != "event_msg" {
+            continue;
+        }
+        let state = match envelope.payload.kind.as_str() {
+            "task_started" => AgentState::Active,
+            "task_complete" | "turn_aborted" => AgentState::Idle,
+            _ => continue,
+        };
+        let Ok(timestamp) = DateTime::parse_from_rfc3339(&envelope.timestamp) else {
+            continue;
+        };
+        return Ok(Some(LifecycleEvent {
+            timestamp: timestamp.with_timezone(&Utc).into(),
+            state,
+        }));
+    }
+    Ok(None)
 }
 
 pub fn default_runtime_root() -> PathBuf {
@@ -450,40 +517,237 @@ mod tests {
         assert!(provider.archived_session_ids().contains(session_id));
     }
 
+    fn active_record(path: Option<PathBuf>) -> CodexStatusRecord {
+        let mut record: CodexStatusRecord = serde_json::from_str(
+            r#"{"session_id":"s","pid":42,"state":"active","event":"PostToolUse","timestamp":"2026-09-10T10:00:00Z"}"#,
+        ).unwrap();
+        record.transcript_path = path;
+        record
+    }
+
+    fn lifecycle(kind: &str, timestamp: &str) -> String {
+        format!(r#"{{"timestamp":"{timestamp}","type":"event_msg","payload":{{"type":"{kind}"}}}}"#)
+            + "\n"
+    }
+
     #[test]
-    fn settles_active_model_work_when_interrupt_emits_no_stop() {
+    fn permission_requests_need_to_persist_before_attracting_attention() {
+        let mut record = active_record(None);
+        record.state = "waiting".into();
+        record.event = "PermissionRequest".into();
         let started = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        for elapsed in [
+            Duration::ZERO,
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+            PERMISSION_ATTENTION_GRACE - Duration::from_millis(1),
+        ] {
+            assert_eq!(
+                record.effective_state(started, started + elapsed),
+                AgentState::Active
+            );
+        }
+        // No second hook is needed: the periodic discovery reveals a lasting wait.
+        for elapsed in [PERMISSION_ATTENTION_GRACE, Duration::from_secs(30)] {
+            assert_eq!(
+                record.effective_state(started, started + elapsed),
+                AgentState::Waiting
+            );
+        }
+        // A future timestamp should not bypass the grace period.
         assert_eq!(
-            settle_interrupted_activity(
-                AgentState::Active,
-                "PostToolUse",
-                started,
-                started + INTERRUPTED_ACTIVITY_GRACE - Duration::from_millis(1),
+            record.effective_state(started, started - Duration::from_secs(1)),
+            AgentState::Active
+        );
+    }
+
+    #[test]
+    fn a_resolved_permission_request_never_becomes_a_delayed_alert() {
+        let started = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        let mut record = active_record(None);
+        record.state = "waiting".into();
+        record.event = "PermissionRequest".into();
+        assert_eq!(
+            record.effective_state(started, started + Duration::from_secs(1)),
+            AgentState::Active
+        );
+        // Discovery reads the latest hook, so nothing is queued to turn orange later.
+        for (event, state, expected) in [
+            ("PreToolUse", "active", AgentState::Active),
+            ("PostToolUse", "active", AgentState::Active),
+            ("Stop", "idle", AgentState::Idle),
+        ] {
+            record.event = event.into();
+            record.state = state.into();
+            assert_eq!(
+                record.effective_state(
+                    started + Duration::from_secs(2),
+                    started + Duration::from_secs(30)
+                ),
+                expected
+            );
+        }
+        // A subsequent request gets its own full grace period.
+        record.event = "PermissionRequest".into();
+        record.state = "waiting".into();
+        assert_eq!(
+            record.effective_state(
+                started + Duration::from_secs(30),
+                started + Duration::from_secs(31)
             ),
             AgentState::Active
         );
+    }
+
+    #[test]
+    fn attention_grace_does_not_delay_other_states_or_terminal_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("rollout.jsonl");
+        let mut record = active_record(Some(path.clone()));
+        let started = record.last_activity(&path);
+        for (event, state, expected) in [
+            ("OtherInputRequest", "waiting", AgentState::Waiting),
+            ("PreCompact", "compacting", AgentState::Compacting),
+            ("Stop", "waiting", AgentState::Idle),
+        ] {
+            record.event = event.into();
+            record.state = state.into();
+            assert_eq!(record.effective_state(started, started), expected);
+        }
+        record.event = "PermissionRequest".into();
+        record.state = "waiting".into();
+        for event in ["task_complete", "turn_aborted"] {
+            fs::write(&path, lifecycle(event, "2026-09-10T10:00:01Z")).unwrap();
+            assert_eq!(
+                record.effective_state(started, started + Duration::from_secs(2)),
+                AgentState::Idle
+            );
+        }
+    }
+
+    #[test]
+    fn long_thinking_does_not_expire_without_a_terminal_event() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("rollout.jsonl");
+        fs::write(&path, lifecycle("task_started", "2026-09-10T09:59:59Z")).unwrap();
+        let record = active_record(Some(path.clone()));
+        let last_activity = record.last_activity(&path);
         assert_eq!(
-            settle_interrupted_activity(
-                AgentState::Active,
-                "PostToolUse",
-                started,
-                started + INTERRUPTED_ACTIVITY_GRACE,
+            record.effective_state(last_activity, last_activity + Duration::from_secs(3600)),
+            AgentState::Active
+        );
+        // Old helpers and unavailable transcripts also must not equate silence
+        // with completion. Process liveness is checked separately by discover.
+        assert_eq!(
+            active_record(None)
+                .effective_state(last_activity, last_activity + Duration::from_secs(3600)),
+            AgentState::Active
+        );
+        fs::remove_file(&path).unwrap();
+        assert_eq!(
+            record.effective_state(last_activity, last_activity + Duration::from_secs(3600)),
+            AgentState::Active
+        );
+    }
+
+    #[test]
+    fn terminal_events_recover_a_missing_stop_even_during_tools_or_compaction() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("rollout.jsonl");
+        for terminal in ["task_complete", "turn_aborted"] {
+            fs::write(&path, lifecycle(terminal, "2026-09-10T10:30:00Z")).unwrap();
+            for (state, event) in [
+                ("active", "PostToolUse"),
+                ("active", "PreToolUse"),
+                ("waiting", "PermissionRequest"),
+                ("compacting", "PreCompact"),
+            ] {
+                let mut record = active_record(Some(path.clone()));
+                record.state = state.into();
+                record.event = event.into();
+                assert_eq!(
+                    record.effective_state(
+                        record.last_activity(&path),
+                        record.last_activity(&path) + Duration::from_secs(3600)
+                    ),
+                    AgentState::Idle
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn old_completion_cannot_override_a_new_prompt_or_permission_request() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("rollout.jsonl");
+        fs::write(&path, lifecycle("task_complete", "2026-09-10T09:59:59Z")).unwrap();
+        let mut record = active_record(Some(path.clone()));
+        assert_eq!(
+            record.effective_state(
+                record.last_activity(&path),
+                record.last_activity(&path) + Duration::from_secs(3600)
             ),
+            AgentState::Active
+        );
+        record.state = "waiting".into();
+        fs::write(&path, lifecycle("task_started", "2026-09-10T09:59:59Z")).unwrap();
+        assert_eq!(
+            record.effective_state(
+                record.last_activity(&path),
+                record.last_activity(&path) + Duration::from_secs(3600)
+            ),
+            AgentState::Waiting
+        );
+        fs::write(&path, lifecycle("task_started", "2026-09-10T10:01:00Z")).unwrap();
+        assert_eq!(
+            record.effective_state(
+                record.last_activity(&path),
+                record.last_activity(&path) + Duration::from_secs(3600)
+            ),
+            AgentState::Active
+        );
+    }
+
+    #[test]
+    fn ignores_message_content_and_partial_records_and_uses_the_latest_turn() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("rollout.jsonl");
+        let content = lifecycle("task_complete", "2026-09-10T10:01:00Z")
+            + &lifecycle("task_started", "2026-09-10T10:02:00Z")
+            + r#"{"timestamp":"2026-09-10T10:03:00Z","type":"response_item","payload":{"type":"task_complete","content":"private"}}"#
+            + "\n"
+            + r#"{"timestamp":"2026-09-10T10:04:00Z","type":"event_msg","payload":{"type":"agent_message","message":"task_complete"}}"#
+            + "\n"
+            + lifecycle("turn_aborted", "2026-09-10T10:05:00Z").trim_end();
+        fs::write(&path, content).unwrap();
+        assert_eq!(
+            latest_lifecycle(&path).unwrap().unwrap().state,
+            AgentState::Active
+        );
+        use std::io::Write;
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"\n")
+            .unwrap();
+        assert_eq!(
+            latest_lifecycle(&path).unwrap().unwrap().state,
             AgentState::Idle
         );
     }
 
     #[test]
-    fn does_not_expire_an_explicitly_running_tool() {
-        let started = SystemTime::UNIX_EPOCH;
+    fn handles_a_tail_starting_in_the_middle_of_a_large_record() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("rollout.jsonl");
+        let content = "x".repeat(LIFECYCLE_TAIL_BYTES as usize + 100)
+            + "\n"
+            + &lifecycle("turn_aborted", "2026-09-10T10:01:00Z");
+        fs::write(&path, content).unwrap();
         assert_eq!(
-            settle_interrupted_activity(
-                AgentState::Active,
-                "PreToolUse",
-                started,
-                started + Duration::from_secs(300),
-            ),
-            AgentState::Active
+            latest_lifecycle(&path).unwrap().unwrap().state,
+            AgentState::Idle
         );
     }
 }
