@@ -73,6 +73,11 @@ impl CodexStatusRecord {
             return AgentState::Idle;
         }
         match self.state.as_str() {
+            // Older helpers classified every PreToolUse as active. Recognize
+            // existing blocked sessions without waiting for another hook.
+            "active" if self.event == "PreToolUse" && self.activity == "request_user_input" => {
+                AgentState::Waiting
+            }
             "active" => AgentState::Active,
             "waiting" => AgentState::Waiting,
             "compacting" => AgentState::Compacting,
@@ -567,6 +572,53 @@ mod tests {
             record.effective_state(started, started - Duration::from_secs(1)),
             AgentState::Active
         );
+    }
+
+    #[test]
+    fn user_input_is_waiting_immediately_including_records_from_older_helpers() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("rollout.jsonl");
+        fs::write(&path, lifecycle("task_started", "2026-09-10T09:59:59Z")).unwrap();
+        let mut record = active_record(Some(path.clone()));
+        record.event = "PreToolUse".into();
+        record.activity = "request_user_input".into();
+        let started = record.last_activity(&path);
+        for state in ["active", "waiting"] {
+            record.state = state.into();
+            for elapsed in [Duration::ZERO, Duration::from_secs(3600)] {
+                assert_eq!(
+                    record.effective_state(started, started + elapsed),
+                    AgentState::Waiting
+                );
+            }
+        }
+
+        // The corresponding tool result resumes work, even with the same name.
+        record.state = "active".into();
+        record.event = "PostToolUse".into();
+        assert_eq!(record.effective_state(started, started), AgentState::Active);
+        record.event = "PreToolUse".into();
+        for tool in ["request_user_input_async", "Bash", ""] {
+            record.activity = tool.into();
+            assert_eq!(record.effective_state(started, started), AgentState::Active);
+        }
+    }
+
+    #[test]
+    fn terminal_events_clear_blocking_user_input_from_older_helpers() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("rollout.jsonl");
+        let mut record = active_record(Some(path.clone()));
+        record.event = "PreToolUse".into();
+        record.activity = "request_user_input".into();
+        let started = record.last_activity(&path);
+        for event in ["task_complete", "turn_aborted"] {
+            fs::write(&path, lifecycle(event, "2026-09-10T10:00:01Z")).unwrap();
+            assert_eq!(
+                record.effective_state(started, started + Duration::from_secs(2)),
+                AgentState::Idle
+            );
+        }
     }
 
     #[test]

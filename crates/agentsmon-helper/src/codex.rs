@@ -130,6 +130,11 @@ fn event_state(input: &HookInput) -> (&'static str, String) {
     match input.hook_event_name.as_str() {
         "SessionStart" => ("idle", String::new()),
         "PermissionRequest" => ("waiting", "input".into()),
+        // This tool blocks until the user answers. Async questions return
+        // immediately and must retain the normal active tool state.
+        "PreToolUse" if input.tool_name.as_deref() == Some("request_user_input") => {
+            ("waiting", "request_user_input".into())
+        }
         "PreCompact" => ("compacting", "compacting".into()),
         "Stop" => ("idle", String::new()),
         "PostCompact" | "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => {
@@ -372,6 +377,25 @@ mod tests {
         assert_eq!(event_state(&input("PreCompact")).0, "compacting");
         assert_eq!(event_state(&input("PostCompact")).0, "active");
         assert_eq!(event_state(&input("Stop")).0, "idle");
+    }
+
+    #[test]
+    fn blocking_user_input_waits_until_the_tool_returns() {
+        // Hook payloads can include questions/answers; decode only metadata.
+        let mut hook: HookInput = serde_json::from_str(
+            r#"{"session_id":"s","hook_event_name":"PreToolUse","tool_name":"request_user_input","tool_input":{"questions":[{"question":"private"}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(event_state(&hook), ("waiting", "request_user_input".into()));
+
+        hook.hook_event_name = "PostToolUse".into();
+        assert_eq!(event_state(&hook), ("active", "request_user_input".into()));
+
+        for tool in ["request_user_input_async", "Bash"] {
+            hook.hook_event_name = "PreToolUse".into();
+            hook.tool_name = Some(tool.into());
+            assert_eq!(event_state(&hook), ("active", tool.into()));
+        }
     }
 
     #[test]
