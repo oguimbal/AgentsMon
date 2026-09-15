@@ -5,7 +5,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use agentsmon_core::{AgentStore, ProviderStatus};
-use agentsmon_providers::{AgentProvider, ClaudeProvider, CodexProvider, ProviderWatcher};
+use agentsmon_providers::{
+    AgentProvider, ClaudeProvider, CodexProvider, ProviderWatcher, VibeProvider,
+};
 use agentsmon_ui::{
     agent_details_height, natural_width, provider_details_height, AgentDetailsView, MonitorEvent,
     MonitorView, ProviderDetailsView,
@@ -62,6 +64,7 @@ fn main() {
         let providers: Vec<Arc<dyn AgentProvider>> = vec![
             Arc::new(ClaudeProvider::new()),
             Arc::new(CodexProvider::new()),
+            Arc::new(VibeProvider::new()),
         ];
         let watchers: Vec<_> = providers
             .iter()
@@ -121,6 +124,10 @@ fn ensure_integrations(cx: &mut App) {
                 Err(error) => {
                     tracing::warn!(%error, "automatic Claude integration setup failed; use the application diagnostic to retry")
                 }
+            }
+            match vibe_integration::install() {
+                Ok(()) => tracing::info!("Mistral Vibe integration installed automatically"),
+                Err(error) => tracing::warn!(%error, "automatic Mistral Vibe integration setup failed"),
             }
             match codex_integration::install() {
                 Ok(()) => {
@@ -200,7 +207,10 @@ fn refresh(state: &AppState, cx: &mut App) {
                 None
             }
         };
-        provider_statuses.push(ProviderStatus::new(provider.id(), usage.clone()));
+        let mut status = ProviderStatus::new(provider.id(), usage.clone());
+        status.display_name = provider.display_name().into();
+        status.icon_png = provider.icon_png().map(<[u8]>::to_vec);
+        provider_statuses.push(status);
         match provider.discover() {
             Ok(mut provider_snapshots) => {
                 for snapshot in &mut provider_snapshots {
@@ -443,8 +453,15 @@ fn open_details(
         app_id: Some("com.oliv.AgentsMon.details".into()),
         ..Default::default()
     };
+    let provider_name = state
+        .0
+        .providers
+        .iter()
+        .find(|provider| provider.id() == agent.id.provider)
+        .map(|provider| provider.display_name().to_string())
+        .unwrap_or_else(|| agent.id.provider.clone());
     match cx.open_window(options, move |_, cx| {
-        cx.new(|_| AgentDetailsView::new(agent))
+        cx.new(|_| AgentDetailsView::new(agent, provider_name))
     }) {
         Ok(handle) => {
             *state.0.details_window.borrow_mut() = Some(handle.into());
@@ -994,3 +1011,4 @@ fn move_native_panels(x_offset: f32) {
 
 mod codex_integration;
 mod integration;
+mod vibe_integration;

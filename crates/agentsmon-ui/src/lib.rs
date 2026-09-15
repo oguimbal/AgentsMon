@@ -1,8 +1,8 @@
 //! GPUI views for AgentsMon.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::f32::consts::PI;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use agentsmon_core::{
     AgentId, AgentSnapshot, AgentState, ProviderStatus, ProviderUsage, UsageLimit,
@@ -95,7 +95,7 @@ impl MonitorView {
                     cx.emit(MonitorEvent::HideDetails);
                 }
             }))
-            .child(provider_ring(provider.id, usage))
+            .child(provider_ring(provider.icon_png, usage))
     }
 
     fn render_card(&self, agent: AgentSnapshot, cx: &mut Context<Self>) -> impl IntoElement {
@@ -378,8 +378,8 @@ fn context_ring_color(percentage: f32) -> u32 {
     }
 }
 
-fn provider_ring(provider: String, usage: Option<ProviderUsage>) -> impl IntoElement {
-    let logo = provider_logo(&provider);
+fn provider_ring(icon_png: Option<Vec<u8>>, usage: Option<ProviderUsage>) -> impl IntoElement {
+    let logo = icon_png.map(provider_icon);
     let has_logo = logo.is_some();
     let percentages: Vec<_> = usage
         .as_ref()
@@ -446,32 +446,17 @@ fn provider_ring(provider: String, usage: Option<ProviderUsage>) -> impl IntoEle
         })
 }
 
-fn provider_logo(provider: &str) -> Option<Arc<Image>> {
-    static OPENAI: OnceLock<Arc<Image>> = OnceLock::new();
-    static CLAUDE: OnceLock<Arc<Image>> = OnceLock::new();
-    match provider {
-        "codex" => Some(
-            OPENAI
-                .get_or_init(|| {
-                    Arc::new(Image::from_bytes(
-                        ImageFormat::Png,
-                        include_bytes!("../assets/openai-16.png").to_vec(),
-                    ))
-                })
-                .clone(),
-        ),
-        "claude" => Some(
-            CLAUDE
-                .get_or_init(|| {
-                    Arc::new(Image::from_bytes(
-                        ImageFormat::Png,
-                        include_bytes!("../assets/claude-16.png").to_vec(),
-                    ))
-                })
-                .clone(),
-        ),
-        _ => None,
-    }
+fn provider_icon(bytes: Vec<u8>) -> Arc<Image> {
+    // Reuse GPUI image identities across refreshes and displays for any provider.
+    static ICONS: OnceLock<Mutex<HashMap<Vec<u8>, Arc<Image>>>> = OnceLock::new();
+    let mut icons = ICONS
+        .get_or_init(Mutex::default)
+        .lock()
+        .expect("provider icon cache poisoned");
+    icons
+        .entry(bytes.clone())
+        .or_insert_with(|| Arc::new(Image::from_bytes(ImageFormat::Png, bytes)))
+        .clone()
 }
 
 fn format_percentage(value: f32) -> String {
@@ -637,11 +622,11 @@ fn draw_arc(
     }
 }
 
-pub struct AgentDetailsView(AgentSnapshot);
+pub struct AgentDetailsView(AgentSnapshot, String);
 
 impl AgentDetailsView {
-    pub fn new(agent: AgentSnapshot) -> Self {
-        Self(agent)
+    pub fn new(agent: AgentSnapshot, provider_name: String) -> Self {
+        Self(agent, provider_name)
     }
 }
 
@@ -679,7 +664,7 @@ impl Render for ProviderDetailsView {
             .child(
                 div()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child(provider_label(&provider.id).to_string()),
+                    .child(provider.label().to_string()),
             )
             .child(
                 div()
@@ -704,7 +689,7 @@ impl Render for ProviderDetailsView {
 impl Render for AgentDetailsView {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let agent = &self.0;
-        let provider = provider_label(&agent.id.provider);
+        let provider = &self.1;
         let state = state_label(agent.state);
         let path = if !agent.cwd.as_os_str().is_empty() {
             agent.cwd.display().to_string()
@@ -830,14 +815,6 @@ fn usage_rows(usage: &ProviderUsage) -> Vec<(String, String)> {
         ));
     }
     rows
-}
-
-fn provider_label(provider: &str) -> &str {
-    match provider {
-        "claude" => "Claude",
-        "codex" => "Codex",
-        value => value,
-    }
 }
 
 fn state_label(state: AgentState) -> &'static str {

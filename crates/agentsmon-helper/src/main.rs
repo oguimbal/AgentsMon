@@ -3,6 +3,7 @@ mod foreground;
 mod record;
 mod statusline;
 mod transcript;
+mod vibe;
 
 use std::io::{self, Read};
 
@@ -38,6 +39,7 @@ fn run() -> Result<()> {
     match mode.as_str() {
         "hook" => process_hook(&input),
         "codex-hook" => codex::process(&input),
+        "vibe-hook" => vibe::process(&input),
         "statusline-proxy" => statusline::proxy(&input),
         _ => bail!("unknown mode {mode}"),
     }

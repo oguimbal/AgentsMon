@@ -84,6 +84,10 @@ pub struct ProviderUsage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderStatus {
     pub id: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub icon_png: Option<Vec<u8>>,
     pub usage: Option<ProviderUsage>,
 }
 
@@ -91,7 +95,16 @@ impl ProviderStatus {
     pub fn new(id: impl Into<String>, usage: Option<ProviderUsage>) -> Self {
         Self {
             id: id.into(),
+            display_name: String::new(),
+            icon_png: None,
             usage,
+        }
+    }
+    pub fn label(&self) -> &str {
+        if self.display_name.is_empty() {
+            &self.id
+        } else {
+            &self.display_name
         }
     }
 }

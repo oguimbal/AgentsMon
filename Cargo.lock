@@ -46,6 +46,8 @@ dependencies = [
  "objc2",
  "objc2-app-kit",
  "serde_json",
+ "tempfile",
+ "toml_edit 0.22.27",
  "tracing",
  "tracing-subscriber",
  "windows 0.61.3",
@@ -62,6 +64,8 @@ dependencies = [
 name = "agentsmon-helper"
 version = "0.1.0"
 dependencies = [
+ "agentsmon-core",
+ "agentsmon-providers",
  "anyhow",
  "chrono",
  "directories",

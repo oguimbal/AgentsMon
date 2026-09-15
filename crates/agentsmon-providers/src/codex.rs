@@ -183,6 +183,14 @@ impl AgentProvider for CodexProvider {
         "codex"
     }
 
+    fn display_name(&self) -> &'static str {
+        "Codex"
+    }
+
+    fn icon_png(&self) -> Option<&'static [u8]> {
+        Some(include_bytes!("../assets/openai-16.png"))
+    }
+
     fn discover(&self) -> Result<Vec<AgentSnapshot>> {
         let records: Vec<_> = self
             .scan_files()?

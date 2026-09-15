@@ -177,15 +177,15 @@ fn merge_rate_limits(
     }
 }
 
-struct EnvironmentMetadata {
-    host_app: Option<String>,
-    terminal_session_id: Option<String>,
-    tmux_pane: Option<String>,
-    tmux_socket: Option<String>,
+pub(crate) struct EnvironmentMetadata {
+    pub host_app: Option<String>,
+    pub terminal_session_id: Option<String>,
+    pub tmux_pane: Option<String>,
+    pub tmux_socket: Option<String>,
 }
 
 impl EnvironmentMetadata {
-    fn current() -> Self {
+    pub(crate) fn current() -> Self {
         let terminal_session_id = std::env::var("ITERM_SESSION_ID")
             .ok()
             .or_else(|| std::env::var("WT_SESSION").ok());

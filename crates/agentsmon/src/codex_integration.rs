@@ -264,7 +264,7 @@ fn home_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
+pub(crate) fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
     fs::create_dir_all(path.parent().expect("hooks path has parent"))?;
     let temporary = path.with_extension("agentsmon.tmp");
     fs::write(&temporary, contents)?;
