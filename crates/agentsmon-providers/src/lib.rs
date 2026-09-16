@@ -10,7 +10,7 @@ use agentsmon_core::{AgentSnapshot, FocusTarget, ProviderUsage};
 use anyhow::Result;
 
 pub use claude::{CStatusRecord, ClaudeProvider, ProviderWatcher};
-pub use codex::{CodexProvider, CodexStatusRecord};
+pub use codex::{CodexApprovalsReviewer, CodexProvider, CodexStatusRecord};
 pub use vibe::{VibeProvider, VibeStatusRecord};
 
 pub trait AgentProvider: Send + Sync {

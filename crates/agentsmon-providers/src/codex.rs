@@ -43,6 +43,17 @@ pub struct CodexStatusRecord {
     pub rate_limits: Option<CodexRateLimits>,
     #[serde(default)]
     pub title: Option<String>,
+    #[serde(default)]
+    pub approvals_reviewer: Option<CodexApprovalsReviewer>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexApprovalsReviewer {
+    User,
+    AutoReview,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +82,19 @@ impl CodexStatusRecord {
         // waiting. A completed turn is resting, not awaiting actionable input.
         if self.event == "Stop" && self.state == "waiting" {
             return AgentState::Idle;
+        }
+        // PermissionRequest precedes the review and execution. Codex does not
+        // send a second PreToolUse after approval, so an automatic review would
+        // otherwise look like user input until PostToolUse (however long it takes).
+        // MCP tools can override the thread reviewer; keep their existing mapping.
+        if self.event == "PermissionRequest"
+            && matches!(
+                self.activity.as_str(),
+                "Bash" | "apply_patch" | "Edit" | "Write"
+            )
+            && self.approvals_reviewer == Some(CodexApprovalsReviewer::AutoReview)
+        {
+            return AgentState::Active;
         }
         match self.state.as_str() {
             // Older helpers classified every PreToolUse as active. Recognize
@@ -575,6 +599,49 @@ mod tests {
     }
 
     #[test]
+    fn automatic_command_reviews_stay_active_for_the_entire_execution() {
+        let mut record = active_record(None);
+        record.state = "waiting".into();
+        record.event = "PermissionRequest".into();
+        let started = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        for tool in ["Bash", "apply_patch", "Edit", "Write"] {
+            record.activity = tool.into();
+            for reviewer in [
+                Some(CodexApprovalsReviewer::AutoReview),
+                Some(CodexApprovalsReviewer::User),
+                Some(CodexApprovalsReviewer::Unknown),
+                None,
+            ] {
+                record.approvals_reviewer = reviewer;
+                for elapsed in [
+                    Duration::ZERO,
+                    Duration::from_secs(15),
+                    Duration::from_secs(3600),
+                ] {
+                    let expected = if reviewer == Some(CodexApprovalsReviewer::AutoReview)
+                        || elapsed < PERMISSION_ATTENTION_GRACE
+                    {
+                        AgentState::Active
+                    } else {
+                        AgentState::Waiting
+                    };
+                    assert_eq!(record.effective_state(started, started + elapsed), expected);
+                }
+            }
+        }
+        // Apps can use a different reviewer, and missing tool metadata from an
+        // older helper cannot establish that this is an automatic command review.
+        record.approvals_reviewer = Some(CodexApprovalsReviewer::AutoReview);
+        for tool in ["mcp__server__tool", "input", ""] {
+            record.activity = tool.into();
+            assert_eq!(
+                record.effective_state(started, started + Duration::from_secs(30)),
+                AgentState::Waiting
+            );
+        }
+    }
+
+    #[test]
     fn user_input_is_waiting_immediately_including_records_from_older_helpers() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("rollout.jsonl");
@@ -582,6 +649,7 @@ mod tests {
         let mut record = active_record(Some(path.clone()));
         record.event = "PreToolUse".into();
         record.activity = "request_user_input".into();
+        record.approvals_reviewer = Some(CodexApprovalsReviewer::AutoReview);
         let started = record.last_activity(&path);
         for state in ["active", "waiting"] {
             record.state = state.into();
