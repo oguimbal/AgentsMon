@@ -139,6 +139,11 @@ impl AgentProvider for VibeProvider {
         Some(include_bytes!("../assets/mistral-vibe-16.png"))
     }
 
+    fn accent_rgb(&self) -> Option<u32> {
+        // Mistral orange, matching the tinted Vibe mark above.
+        Some(0xff7000)
+    }
+
     fn discover(&self) -> Result<Vec<AgentSnapshot>> {
         let entries = match fs::read_dir(&self.root) {
             Ok(entries) => entries,
@@ -187,6 +192,7 @@ impl AgentProvider for VibeProvider {
                 project_name: AgentSnapshot::project_name(&cwd),
                 cwd,
                 title: None,
+                custom_name: None,
                 state: record.state,
                 context_usage,
                 provider_usage: None,

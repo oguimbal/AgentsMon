@@ -21,6 +21,11 @@ pub trait AgentProvider: Send + Sync {
     fn icon_png(&self) -> Option<&'static [u8]> {
         None
     }
+    /// Brand colour (0xRRGGBB) drawn as a ring around the context indicator of
+    /// this provider's sessions, so agents on the same repository stay apart.
+    fn accent_rgb(&self) -> Option<u32> {
+        None
+    }
     fn discover(&self) -> Result<Vec<AgentSnapshot>>;
     fn usage(&self) -> Result<Option<ProviderUsage>>;
     fn focus(&self, target: &FocusTarget) -> Result<()>;

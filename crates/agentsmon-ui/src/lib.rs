@@ -1,5 +1,7 @@
 //! GPUI views for AgentsMon.
 
+mod text_input;
+
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::PI;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -9,10 +11,13 @@ use agentsmon_core::{
 };
 use gpui::prelude::*;
 use gpui::{
-    canvas, div, img, point, px, rgb, rgba, Context, DragMoveEvent, EventEmitter, Hsla, Image,
-    ImageFormat, IntoElement, MouseButton, MouseDownEvent, PathBuilder, Render, SharedString,
-    Window,
+    canvas, div, img, point, px, rgb, rgba, Context, DragMoveEvent, Entity, EventEmitter,
+    Focusable, Hsla, Image, ImageFormat, IntoElement, MouseButton, MouseDownEvent, PathBuilder,
+    Render, SharedString, Subscription, Window,
 };
+
+pub use text_input::key_bindings as rename_key_bindings;
+use text_input::{TextInput, TextInputEvent};
 
 #[derive(Debug, Clone)]
 pub enum MonitorEvent {
@@ -32,6 +37,11 @@ pub enum MonitorEvent {
         anchor_x: f32,
     },
     HideDetails,
+    /// Right click on a card: open the rename prompt for that session.
+    Rename {
+        agent: Box<AgentSnapshot>,
+        anchor_x: f32,
+    },
 }
 
 pub struct MonitorView {
@@ -66,6 +76,13 @@ impl MonitorView {
         self.providers = providers;
         self.unread = unread;
         cx.notify();
+    }
+
+    fn accent_for(&self, provider_id: &str) -> Option<u32> {
+        self.providers
+            .iter()
+            .find(|provider| provider.id == provider_id)
+            .and_then(|provider| provider.accent_rgb)
     }
 
     fn render_provider(
@@ -103,9 +120,12 @@ impl MonitorView {
         let focus_id = id.clone();
         let hide_id = id.clone();
         let live_target = id.clone();
-        let drag_label = agent.project_name.clone();
+        let label = agent.label().to_owned();
+        let drag_label = label.clone();
         let context = agent.context_usage.map(|usage| usage.used_percentage());
+        let accent = self.accent_for(&id.provider);
         let hover_details = agent.clone();
+        let rename_details = agent.clone();
         let is_unread = self.unread.contains(&id);
         let state_background = state_color(agent.state);
 
@@ -135,6 +155,16 @@ impl MonitorView {
                 }
             }))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |_, _: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    cx.emit(MonitorEvent::Rename {
+                        agent: Box::new(rename_details.clone()),
+                        anchor_x: window.mouse_position().x.as_f32(),
+                    });
+                }),
+            )
             .on_click(cx.listener(move |_, _, _event, cx| {
                 cx.emit(MonitorEvent::Focus(focus_id.clone()));
             }))
@@ -176,8 +206,8 @@ impl MonitorView {
             .child(
                 div()
                     .id(SharedString::from(format!("context-{}", id.session_id)))
-                    .size(px(12.0))
-                    .child(context_pie(context)),
+                    .size(px(CONTEXT_INDICATOR_SIZE))
+                    .child(context_pie(context, accent)),
             )
             .child(
                 div()
@@ -186,7 +216,7 @@ impl MonitorView {
                     .text_ellipsis()
                     .text_size(px(10.0))
                     .text_color(rgb(0xe8e8ea))
-                    .child(SharedString::from(agent.project_name)),
+                    .child(SharedString::from(label)),
             )
             .child(
                 div()
@@ -340,7 +370,13 @@ fn state_color(state: AgentState) -> Hsla {
     }
 }
 
-fn context_pie(percentage: Option<f32>) -> impl IntoElement {
+/// Side of the square holding the context pie and its provider ring.
+const CONTEXT_INDICATOR_SIZE: f32 = 14.0;
+
+/// Context pie (grey base, white/amber/red wedge) on a thin ring in the
+/// provider's brand colour. The ring is a separate, constant-width shape so
+/// it never reads as a context level, whatever hue the provider uses.
+fn context_pie(percentage: Option<f32>, accent_rgb: Option<u32>) -> impl IntoElement {
     canvas(
         |_, _, _| {},
         move |bounds, _, window, _| {
@@ -349,6 +385,9 @@ fn context_pie(percentage: Option<f32>) -> impl IntoElement {
                 bounds.origin.y + bounds.size.height / 2.0,
             );
             let radius = px(5.0);
+            if let Some(accent) = accent_rgb {
+                draw_filled_circle(window, center, px(6.5), rgb(accent).into());
+            }
             draw_filled_circle(window, center, radius, rgb(0x686b75).into());
             if let Some(progress) = ring_progress(percentage) {
                 draw_pie(
@@ -361,7 +400,7 @@ fn context_pie(percentage: Option<f32>) -> impl IntoElement {
             }
         },
     )
-    .size(px(12.0))
+    .size(px(CONTEXT_INDICATOR_SIZE))
 }
 
 fn ring_progress(percentage: Option<f32>) -> Option<f32> {
@@ -737,7 +776,7 @@ impl Render for AgentDetailsView {
                         agent
                             .title
                             .clone()
-                            .unwrap_or_else(|| agent.project_name.clone()),
+                            .unwrap_or_else(|| agent.label().to_owned()),
                     ),
             )
             .child(div().text_color(rgb(0xb9bbc3)).child(path))
@@ -856,6 +895,131 @@ fn format_reset(reset: std::time::SystemTime) -> String {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum RenameEvent {
+    Submit { id: AgentId, name: String },
+    Cancel,
+}
+
+/// Prompt opened by a right click on a card: the hover details (conversation
+/// title, full path, provider and state) above a text field pre-filled with
+/// the current label, fully selected so typing replaces it.
+pub struct RenameView {
+    agent: AgentSnapshot,
+    provider_name: String,
+    input: Entity<TextInput>,
+    was_active: bool,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl RenameView {
+    pub fn new(
+        agent: AgentSnapshot,
+        provider_name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let input = cx.new(|cx| TextInput::new(agent.label().to_owned(), cx));
+        let id = agent.id.clone();
+        let input_events = cx.subscribe(&input, move |this, input, event, cx| match event {
+            TextInputEvent::Confirm => {
+                let name = input.read(cx).text().to_owned();
+                this.was_active = false;
+                cx.emit(RenameEvent::Submit {
+                    id: id.clone(),
+                    name,
+                });
+            }
+            TextInputEvent::Cancel => {
+                this.was_active = false;
+                cx.emit(RenameEvent::Cancel);
+            }
+        });
+        // Clicking anywhere else dismisses the prompt, like a native rename field.
+        let activation = cx.observe_window_activation(window, |this, window, cx| {
+            let active = window.is_window_active();
+            if this.was_active && !active {
+                cx.emit(RenameEvent::Cancel);
+            }
+            this.was_active = active;
+        });
+        window.focus(&input.focus_handle(cx), cx);
+        Self {
+            agent,
+            provider_name,
+            input,
+            was_active: false,
+            _subscriptions: vec![input_events, activation],
+        }
+    }
+}
+
+impl EventEmitter<RenameEvent> for RenameView {}
+
+impl Render for RenameView {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let agent = &self.agent;
+        let heading = agent
+            .title
+            .clone()
+            .unwrap_or_else(|| agent.project_name.clone());
+        let path = if !agent.cwd.as_os_str().is_empty() {
+            agent.cwd.display().to_string()
+        } else {
+            "Chemin indisponible".into()
+        };
+        let mut meta = format!("{} · {}", self.provider_name, state_label(agent.state));
+        if let Some(usage) = agent.context_usage {
+            meta.push_str(&format!(
+                " · contexte {} %",
+                format_percentage(usage.used_percentage())
+            ));
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(5.0))
+            .size_full()
+            .px(px(9.0))
+            .py(px(7.0))
+            .rounded_md()
+            .bg(rgb(0x111216))
+            .text_size(px(11.0))
+            .text_color(rgb(0xf4f4f5))
+            .child(
+                div()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(heading),
+            )
+            .child(
+                div()
+                    .text_color(rgb(0xb9bbc3))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(path),
+            )
+            .child(div().text_color(rgb(0x8f929c)).child(meta))
+            .child(self.input.clone())
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(rgb(0x8f929c))
+                    .child("Entrée : renommer · Échap : annuler · vide : nom du dépôt"),
+            )
+    }
+}
+
+/// Height of the rename prompt: three text rows, the field and the hint line.
+pub fn rename_height() -> f32 {
+    // Field: 16 px line, 4 px vertical padding and 1 px border on both sides.
+    const FIELD: f32 = 16.0 + 2.0 * 4.0 + 2.0;
+    details_height(4) + FIELD + 5.0
+}
+
 struct DragPreview {
     label: String,
 }
@@ -897,7 +1061,7 @@ pub fn natural_width(
     let content = chrome
         + agents
             .iter()
-            .map(|agent| 42.0 + agent.project_name.chars().count().min(27) as f32 * 5.5)
+            .map(|agent| 44.0 + agent.label().chars().count().min(27) as f32 * 5.5)
             .sum::<f32>()
         + if agents.is_empty() { 55.0 } else { 0.0 };
     content.clamp(76.0, max_width.max(76.0))
@@ -1133,6 +1297,7 @@ mod tests {
             cwd: format!("/tmp/{id}").into(),
             project_name: id.into(),
             title: None,
+            custom_name: None,
             state: AgentState::Active,
             context_usage: None,
             provider_usage: None,
@@ -1150,6 +1315,7 @@ mod tests {
             cwd: "/tmp/very-long-project".into(),
             project_name: "x".repeat(100),
             title: None,
+            custom_name: None,
             state: AgentState::Active,
             context_usage: None,
             provider_usage: None,
@@ -1161,7 +1327,11 @@ mod tests {
             500.0
         );
         snapshot.project_name = "a".into();
-        assert!(natural_width(&[snapshot], &[], 500.0) >= 76.0);
+        assert!(natural_width(&[snapshot.clone()], &[], 500.0) >= 76.0);
+        // The bar is sized on the label the card shows, not the project name.
+        let narrow = natural_width(&[snapshot.clone()], &[], 900.0);
+        snapshot.custom_name = Some("un nom nettement plus long".into());
+        assert!(natural_width(&[snapshot], &[], 900.0) > narrow);
     }
 
     #[test]

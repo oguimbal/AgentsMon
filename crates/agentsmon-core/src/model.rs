@@ -89,6 +89,9 @@ pub struct ProviderStatus {
     #[serde(default)]
     pub icon_png: Option<Vec<u8>>,
     pub usage: Option<ProviderUsage>,
+    /// Brand colour (0xRRGGBB) used to tag this provider's sessions in the bar.
+    #[serde(default)]
+    pub accent_rgb: Option<u32>,
 }
 
 impl ProviderStatus {
@@ -98,6 +101,7 @@ impl ProviderStatus {
             display_name: String::new(),
             icon_png: None,
             usage,
+            accent_rgb: None,
         }
     }
     pub fn label(&self) -> &str {
@@ -142,6 +146,9 @@ pub struct AgentSnapshot {
     /// Metadata only: never derived from message text by AgentsMon.
     #[serde(default)]
     pub title: Option<String>,
+    /// Label typed by the user in AgentsMon to replace the project name in the bar.
+    #[serde(default)]
+    pub custom_name: Option<String>,
     pub state: AgentState,
     pub context_usage: Option<ContextUsage>,
     pub provider_usage: Option<ProviderUsage>,
@@ -150,6 +157,14 @@ pub struct AgentSnapshot {
 }
 
 impl AgentSnapshot {
+    /// Text shown on the session card: the user's custom name, else the project name.
+    pub fn label(&self) -> &str {
+        self.custom_name
+            .as_deref()
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or(&self.project_name)
+    }
+
     pub fn project_name(cwd: &Path) -> String {
         cwd.file_name()
             .and_then(|name| name.to_str())

@@ -8,6 +8,7 @@ pub struct AgentStore {
     snapshots: HashMap<AgentId, AgentSnapshot>,
     order: Vec<AgentId>,
     hidden: HashMap<AgentId, SystemTime>,
+    names: HashMap<AgentId, String>,
 }
 
 impl AgentStore {
@@ -16,8 +17,10 @@ impl AgentStore {
         self.snapshots.retain(|id, _| live.contains(id));
         self.order.retain(|id| live.contains(id));
         self.hidden.retain(|id, _| live.contains(id));
+        self.names.retain(|id, _| live.contains(id));
 
-        for snapshot in incoming {
+        for mut snapshot in incoming {
+            snapshot.custom_name = self.names.get(&snapshot.id).cloned();
             let has_new_activity = self.hidden.get(&snapshot.id).is_some_and(|hidden_at| {
                 snapshot.state == AgentState::Active && snapshot.last_activity > *hidden_at
             });
@@ -61,6 +64,21 @@ impl AgentStore {
         }
     }
 
+    /// Set the card label for a session. An empty (or blank) name restores the project name.
+    pub fn rename(&mut self, id: &AgentId, name: &str) {
+        let Some(snapshot) = self.snapshots.get_mut(id) else {
+            return;
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            self.names.remove(id);
+            snapshot.custom_name = None;
+        } else {
+            self.names.insert(id.clone(), name.to_owned());
+            snapshot.custom_name = Some(name.to_owned());
+        }
+    }
+
     pub fn get(&self, id: &AgentId) -> Option<&AgentSnapshot> {
         self.snapshots.get(id)
     }
@@ -81,6 +99,7 @@ mod tests {
             cwd: PathBuf::from(format!("/tmp/{id}")),
             project_name: id.into(),
             title: None,
+            custom_name: None,
             state: AgentState::Idle,
             context_usage: None,
             provider_usage: None,
@@ -108,6 +127,31 @@ mod tests {
         store.apply_snapshot(vec![item("a"), item("b")]);
         assert_eq!(store.visible().len(), 2);
         assert_eq!(store.visible()[1].id.session_id, "b");
+    }
+
+    #[test]
+    fn custom_names_survive_refreshes_and_clear_on_blank() {
+        let mut store = AgentStore::default();
+        store.apply_snapshot(vec![item("a"), item("b")]);
+        let a = AgentId::new("claude", "a");
+        store.rename(&a, "  Refonte auth  ");
+        assert_eq!(store.visible()[0].label(), "Refonte auth");
+        assert_eq!(store.visible()[1].label(), "b");
+
+        store.apply_snapshot(vec![item("a"), item("b")]);
+        assert_eq!(
+            store.get(&a).unwrap().custom_name.as_deref(),
+            Some("Refonte auth")
+        );
+
+        store.rename(&a, "   ");
+        assert_eq!(store.visible()[0].label(), "a");
+        assert!(store.get(&a).unwrap().custom_name.is_none());
+
+        store.rename(&AgentId::new("claude", "zz"), "ghost");
+        store.apply_snapshot(vec![item("b")]);
+        store.apply_snapshot(vec![item("a"), item("b")]);
+        assert!(store.get(&a).unwrap().custom_name.is_none());
     }
 
     #[test]

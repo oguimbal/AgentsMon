@@ -27,7 +27,7 @@ impl NativeNotifications {
         let mut notification = Notification::new();
         notification
             .summary("Agent terminé")
-            .body(&format!("{} attend votre attention", snapshot.project_name))
+            .body(&format!("{} attend votre attention", snapshot.label()))
             .timeout(Timeout::Milliseconds(8_000));
 
         match notification.show() {

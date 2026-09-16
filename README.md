@@ -6,8 +6,9 @@ Each physical display gets the same low-profile bar in its bottom-left corner. E
 
 - the basename of its working directory;
 - green, orange, grey, or blue state feedback;
-- a circular context-window gauge around the state dot;
+- a circular context-window gauge around the state dot, on a thin ring in the provider's brand colour (Claude terracotta, Codex green, Mistral orange) so agents working on the same repository stay apart;
 - drag-and-drop ordering and a temporary hide action;
+- right-click to rename a card (the prompt shows the conversation title and full path; an empty name restores the repository name);
 - click-to-focus for the host terminal or IDE.
 
 There is no tray icon, analytics, conversation storage, or session history.
@@ -101,7 +102,7 @@ The integration follows Mistral's [hook definitions](https://github.com/mistrala
 
 | Crate | Role |
 | --- | --- |
-| `agentsmon-core` | Provider-neutral models and in-memory ordering/hiding store |
+| `agentsmon-core` | Provider-neutral models and in-memory ordering/hiding/renaming store |
 | `agentsmon-providers` | Provider trait, Claude/Codex/Vibe discovery, presentation assets, watchers and OS focus |
 | `agentsmon-ui` | GPUI bars, context ring, drag/drop and diagnostics |
 | `agentsmon-helper` | Claude/Codex/Vibe hook and status-line helper executable |

@@ -220,6 +220,11 @@ impl AgentProvider for CodexProvider {
         Some(include_bytes!("../assets/openai-16.png"))
     }
 
+    fn accent_rgb(&self) -> Option<u32> {
+        // ChatGPT green, the only chromatic OpenAI brand colour.
+        Some(0x10a37f)
+    }
+
     fn discover(&self) -> Result<Vec<AgentSnapshot>> {
         let records: Vec<_> = self
             .scan_files()?
@@ -266,6 +271,7 @@ impl AgentProvider for CodexProvider {
                 pid: record.pid,
                 project_name: AgentSnapshot::project_name(&cwd),
                 title: record.title.clone(),
+                custom_name: None,
                 cwd,
                 state: record.effective_state(last_activity, now),
                 context_usage: record.context_used_percentage.and_then(ContextUsage::new),

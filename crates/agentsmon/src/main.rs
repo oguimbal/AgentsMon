@@ -9,8 +9,9 @@ use agentsmon_providers::{
     AgentProvider, ClaudeProvider, CodexProvider, ProviderWatcher, VibeProvider,
 };
 use agentsmon_ui::{
-    agent_details_height, natural_width, provider_details_height, AgentDetailsView, MonitorEvent,
-    MonitorView, ProviderDetailsView,
+    agent_details_height, natural_width, provider_details_height, rename_height,
+    rename_key_bindings, AgentDetailsView, MonitorEvent, MonitorView, ProviderDetailsView,
+    RenameEvent, RenameView,
 };
 use gpui::{
     actions, point, px, size, AnyWindowHandle, App, AppContext, AsyncApp, Bounds, DisplayId,
@@ -25,6 +26,7 @@ const BAR_HEIGHT: f32 = 23.0;
 const SCREEN_INSET: f32 = 0.0;
 const DETAILS_WIDTH: f32 = 400.0;
 const DETAILS_GAP: f32 = 6.0;
+const RENAME_WINDOW_TITLE: &str = "Renommer la conversation";
 const WATCHED_POLL_INTERVAL: Duration = Duration::from_secs(10);
 const FALLBACK_POLL_INTERVAL: Duration = Duration::from_secs(3);
 const CHANGE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
@@ -51,6 +53,7 @@ struct AppStateInner {
     panels: RefCell<Vec<Panel>>,
     x_offset: RefCell<f32>,
     details_window: RefCell<Option<AnyWindowHandle>>,
+    rename_window: RefCell<Option<AnyWindowHandle>>,
     unread: RefCell<HashSet<agentsmon_core::AgentId>>,
     notifications: notification::NativeNotifications,
 }
@@ -91,11 +94,13 @@ fn main() {
             panels: RefCell::new(Vec::new()),
             x_offset: RefCell::new(0.0),
             details_window: RefCell::new(None),
+            rename_window: RefCell::new(None),
             unread: RefCell::new(HashSet::new()),
             notifications: notification::NativeNotifications::new(),
         }));
 
         cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.bind_keys(rename_key_bindings());
         let show_state = state.clone();
         cx.on_action(move |_: &ShowBars, cx| reconcile_displays(cx, &show_state, true));
         let diagnostics_state = state.clone();
@@ -210,6 +215,7 @@ fn refresh(state: &AppState, cx: &mut App) {
         let mut status = ProviderStatus::new(provider.id(), usage.clone());
         status.display_name = provider.display_name().into();
         status.icon_png = provider.icon_png().map(<[u8]>::to_vec);
+        status.accent_rgb = provider.accent_rgb();
         provider_statuses.push(status);
         match provider.discover() {
             Ok(mut provider_snapshots) => {
@@ -238,7 +244,7 @@ fn refresh(state: &AppState, cx: &mut App) {
             previous.get(&snapshot.id) == Some(&agentsmon_core::AgentState::Active)
                 && snapshot.state != agentsmon_core::AgentState::Active
         })
-        .cloned()
+        .map(|snapshot| snapshot.id.clone())
         .collect();
     let active_ids: Vec<_> = snapshots
         .iter()
@@ -251,9 +257,13 @@ fn refresh(state: &AppState, cx: &mut App) {
         state.0.unread.borrow_mut().remove(&id);
         state.0.notifications.close(&id);
     }
-    for snapshot in completed {
-        state.0.unread.borrow_mut().insert(snapshot.id.clone());
-        state.0.notifications.show(&snapshot);
+    for id in completed {
+        // Read back from the store so the notification carries the user's custom name.
+        let snapshot = state.0.store.borrow().get(&id).cloned();
+        if let Some(snapshot) = snapshot {
+            state.0.unread.borrow_mut().insert(id);
+            state.0.notifications.show(&snapshot);
+        }
     }
     broadcast(state, cx);
 }
@@ -382,6 +392,100 @@ fn handle_event(
             );
         }
         MonitorEvent::HideDetails => close_details(state, cx),
+        MonitorEvent::Rename { agent, anchor_x } => {
+            open_rename(
+                state,
+                display_id,
+                display_bounds,
+                *anchor_x,
+                agent.as_ref().clone(),
+                cx,
+            );
+        }
+    }
+}
+
+fn close_rename(state: &AppState, cx: &mut App) {
+    if let Some(handle) = state.0.rename_window.borrow_mut().take() {
+        let _ = cx.update_window(handle, |_, window, _| window.remove_window());
+    }
+}
+
+fn open_rename(
+    state: &AppState,
+    display_id: DisplayId,
+    display_bounds: Bounds<Pixels>,
+    anchor_x: f32,
+    agent: agentsmon_core::AgentSnapshot,
+    cx: &mut App,
+) {
+    close_details(state, cx);
+    close_rename(state, cx);
+    let panel_x = display_bounds.origin.x.as_f32() + *state.0.x_offset.borrow();
+    let min_x = display_bounds.origin.x.as_f32() + 6.0;
+    let max_x =
+        (display_bounds.origin.x + display_bounds.size.width).as_f32() - DETAILS_WIDTH - 6.0;
+    let x = (panel_x + anchor_x - DETAILS_WIDTH / 2.0).clamp(min_x, max_x.max(min_x));
+    let height = rename_height();
+    let y = (display_bounds.origin.y + display_bounds.size.height).as_f32()
+        - BAR_HEIGHT
+        - DETAILS_GAP
+        - height;
+    // A pop-up panel takes key events without activating AgentsMon, so the
+    // terminal keeps its place once the prompt closes. The title keeps the
+    // native panel/details passes from restyling or click-proofing it.
+    let options = WindowOptions {
+        titlebar: None,
+        window_bounds: Some(WindowBounds::Windowed(Bounds {
+            origin: point(px(x), px(y)),
+            size: size(px(DETAILS_WIDTH), px(height)),
+        })),
+        kind: WindowKind::PopUp,
+        is_movable: false,
+        is_resizable: false,
+        is_minimizable: false,
+        focus: true,
+        show: true,
+        display_id: Some(display_id),
+        window_background: WindowBackgroundAppearance::Transparent,
+        app_id: Some("com.oliv.AgentsMon.rename".into()),
+        ..Default::default()
+    };
+    let provider_name = state
+        .0
+        .providers
+        .iter()
+        .find(|provider| provider.id() == agent.id.provider)
+        .map(|provider| provider.display_name().to_string())
+        .unwrap_or_else(|| agent.id.provider.clone());
+    let entity_slot = Rc::new(RefCell::new(None));
+    let slot = entity_slot.clone();
+    match cx.open_window(options, move |window, cx| {
+        window.set_window_title(RENAME_WINDOW_TITLE);
+        let entity = cx.new(|cx| RenameView::new(agent, provider_name, window, cx));
+        *slot.borrow_mut() = Some(entity.clone());
+        entity
+    }) {
+        Ok(handle) => {
+            *state.0.rename_window.borrow_mut() = Some(handle.into());
+            configure_native_rename();
+            let Some(entity) = entity_slot.borrow().clone() else {
+                return;
+            };
+            let event_state = state.clone();
+            cx.subscribe(&entity, move |_, event, cx| {
+                match event {
+                    RenameEvent::Submit { id, name } => {
+                        event_state.0.store.borrow_mut().rename(id, name);
+                        broadcast(&event_state, cx);
+                    }
+                    RenameEvent::Cancel => {}
+                }
+                close_rename(&event_state, cx);
+            })
+            .detach();
+        }
+        Err(error) => tracing::warn!(%error, "cannot open rename prompt"),
     }
 }
 
@@ -425,6 +529,9 @@ fn open_details(
     agent: agentsmon_core::AgentSnapshot,
     cx: &mut App,
 ) {
+    if state.0.rename_window.borrow().is_some() {
+        return;
+    }
     close_details(state, cx);
     let panel_x = display_bounds.origin.x.as_f32() + *state.0.x_offset.borrow();
     let min_x = display_bounds.origin.x.as_f32() + 6.0;
@@ -479,6 +586,9 @@ fn open_provider_details(
     provider: ProviderStatus,
     cx: &mut App,
 ) {
+    if state.0.rename_window.borrow().is_some() {
+        return;
+    }
     close_details(state, cx);
     let panel_x = display_bounds.origin.x.as_f32() + *state.0.x_offset.borrow();
     let min_x = display_bounds.origin.x.as_f32() + 6.0;
@@ -535,6 +645,7 @@ fn reconcile_displays(cx: &mut App, state: &AppState, force: bool) {
         return;
     }
     close_details(state, cx);
+    close_rename(state, cx);
 
     for panel in state.0.panels.borrow_mut().drain(..) {
         let _ = cx.update_window(panel.handle, |_, window, _| window.remove_window());
@@ -764,6 +875,41 @@ fn configure_native_details() {
         window.setFrameOrigin(origin);
     }
 }
+
+#[cfg(target_os = "macos")]
+fn configure_native_rename() {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSFloatingWindowLevel, NSWindowCollectionBehavior};
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    for index in 0..app.windows().count() {
+        let window = app.windows().objectAtIndex(index);
+        if window.title().to_string() != RENAME_WINDOW_TITLE {
+            continue;
+        }
+        let Some(screen) = window.screen() else {
+            continue;
+        };
+        window.setLevel(NSFloatingWindowLevel);
+        window.setHasShadow(true);
+        window.setCollectionBehavior(
+            window.collectionBehavior()
+                | NSWindowCollectionBehavior::CanJoinAllSpaces
+                | NSWindowCollectionBehavior::FullScreenAuxiliary
+                | NSWindowCollectionBehavior::IgnoresCycle,
+        );
+        let mut origin = window.frame().origin;
+        origin.y = screen.frame().origin.y + f64::from(BAR_HEIGHT + DETAILS_GAP);
+        window.setFrameOrigin(origin);
+        window.makeKeyAndOrderFront(None);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn configure_native_rename() {}
 
 #[cfg(target_os = "windows")]
 fn configure_native_details() {

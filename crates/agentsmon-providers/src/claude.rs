@@ -184,6 +184,11 @@ impl AgentProvider for ClaudeProvider {
         Some(include_bytes!("../assets/claude-16.png"))
     }
 
+    fn accent_rgb(&self) -> Option<u32> {
+        // Claude terracotta, the fill of the official symbol.
+        Some(0xd97757)
+    }
+
     fn discover(&self) -> Result<Vec<AgentSnapshot>> {
         let records = prefer_agentsmon_records(
             self.scan_files()?
@@ -228,6 +233,7 @@ impl AgentProvider for ClaudeProvider {
                 pid: record.pid,
                 project_name: AgentSnapshot::project_name(&cwd),
                 title: record.title,
+                custom_name: None,
                 cwd,
                 state,
                 context_usage: record.context_used_percentage.and_then(ContextUsage::new),
