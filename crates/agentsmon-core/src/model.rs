@@ -174,6 +174,127 @@ impl AgentSnapshot {
     }
 }
 
+/// Why sessions share one card. Today only the working directory groups them;
+/// a `Manual(id)` variant (sessions dropped onto each other) can be added
+/// without touching the UI, which only ever handles opaque keys.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum GroupKey {
+    Directory(PathBuf),
+}
+
+/// Several visible sessions shown as one card.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionGroup {
+    pub key: GroupKey,
+    /// Project name of the first member, the default label.
+    pub project_name: String,
+    /// Label typed by the user for the group card.
+    pub custom_name: Option<String>,
+    /// At least two members, in bar order.
+    pub members: Vec<AgentSnapshot>,
+}
+
+impl SessionGroup {
+    pub fn label(&self) -> &str {
+        self.custom_name
+            .as_deref()
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or(&self.project_name)
+    }
+
+    pub fn ids(&self) -> Vec<AgentId> {
+        self.members
+            .iter()
+            .map(|member| member.id.clone())
+            .collect()
+    }
+
+    /// The member that acted last, the natural target of a click on the group.
+    pub fn most_recent(&self) -> Option<&AgentSnapshot> {
+        self.members
+            .iter()
+            .max_by_key(|member| member.last_activity)
+    }
+
+    /// The directory shared by every member, if there is one.
+    pub fn common_cwd(&self) -> Option<&Path> {
+        let first = self.members.first()?;
+        self.members
+            .iter()
+            .all(|member| member.cwd == first.cwd)
+            .then_some(first.cwd.as_path())
+    }
+}
+
+/// One card of the bar: a lone session or a group sharing a directory.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Slot {
+    Single(Box<AgentSnapshot>),
+    Group(SessionGroup),
+}
+
+impl Slot {
+    pub fn label(&self) -> &str {
+        match self {
+            Slot::Single(agent) => agent.label(),
+            Slot::Group(group) => group.label(),
+        }
+    }
+
+    /// Session ids carried by the card, in bar order.
+    pub fn ids(&self) -> Vec<AgentId> {
+        match self {
+            Slot::Single(agent) => vec![agent.id.clone()],
+            Slot::Group(group) => group.ids(),
+        }
+    }
+
+    /// Identity of the card for drag and drop: its first session.
+    pub fn first_id(&self) -> &AgentId {
+        match self {
+            Slot::Single(agent) => &agent.id,
+            Slot::Group(group) => &group.members[0].id,
+        }
+    }
+}
+
+/// Fold visible sessions into slots, grouping those with the same key.
+/// A group sits where its first member was; `group_name` supplies custom labels.
+pub fn group_sessions(
+    agents: Vec<AgentSnapshot>,
+    key_of: impl Fn(&AgentSnapshot) -> GroupKey,
+    group_name: impl Fn(&GroupKey) -> Option<String>,
+) -> Vec<Slot> {
+    let mut slots: Vec<Slot> = Vec::new();
+    let mut index_by_key: std::collections::HashMap<GroupKey, usize> =
+        std::collections::HashMap::new();
+    for agent in agents {
+        let key = key_of(&agent);
+        match index_by_key.get(&key) {
+            Some(&index) => {
+                let placeholder = Slot::Single(Box::new(agent.clone()));
+                slots[index] = match std::mem::replace(&mut slots[index], placeholder) {
+                    Slot::Single(first) => Slot::Group(SessionGroup {
+                        custom_name: group_name(&key),
+                        key,
+                        project_name: first.project_name.clone(),
+                        members: vec![*first, agent],
+                    }),
+                    Slot::Group(mut group) => {
+                        group.members.push(agent);
+                        Slot::Group(group)
+                    }
+                };
+            }
+            None => {
+                index_by_key.insert(key, slots.len());
+                slots.push(Slot::Single(Box::new(agent)));
+            }
+        }
+    }
+    slots
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,6 +324,54 @@ mod tests {
             100.0
         );
         assert!(UsageLimit::new("x", f32::NAN, None, None).is_none());
+    }
+
+    fn agent(id: &str, cwd: &str) -> AgentSnapshot {
+        AgentSnapshot {
+            id: AgentId::new("claude", id),
+            pid: 1,
+            cwd: cwd.into(),
+            project_name: AgentSnapshot::project_name(Path::new(cwd)),
+            title: None,
+            custom_name: None,
+            state: AgentState::Idle,
+            context_usage: None,
+            provider_usage: None,
+            focus_target: FocusTarget::default(),
+            last_activity: SystemTime::UNIX_EPOCH,
+        }
+    }
+
+    #[test]
+    fn sessions_sharing_a_directory_fold_into_one_slot() {
+        let slots = group_sessions(
+            vec![
+                agent("a", "/repo/x"),
+                agent("b", "/repo/y"),
+                agent("c", "/repo/x"),
+                agent("d", "/repo/x"),
+            ],
+            |agent| GroupKey::Directory(agent.cwd.clone()),
+            |key| (*key == GroupKey::Directory("/repo/x".into())).then(|| "Nom perso".to_owned()),
+        );
+        assert_eq!(slots.len(), 2);
+        let Slot::Group(group) = &slots[0] else {
+            panic!("first slot should be the group");
+        };
+        assert_eq!(group.label(), "Nom perso");
+        assert_eq!(group.project_name, "x");
+        assert_eq!(group.common_cwd(), Some(Path::new("/repo/x")));
+        assert_eq!(
+            group
+                .ids()
+                .iter()
+                .map(|id| id.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "c", "d"]
+        );
+        assert_eq!(slots[0].first_id().session_id, "a");
+        assert!(matches!(&slots[1], Slot::Single(agent) if agent.id.session_id == "b"));
+        assert_eq!(slots[1].label(), "y");
     }
 
     #[test]

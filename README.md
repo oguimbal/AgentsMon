@@ -7,8 +7,9 @@ Each physical display gets the same low-profile bar in its bottom-left corner. E
 - the basename of its working directory;
 - green, orange, grey, or blue state feedback;
 - a circular context-window gauge around the state dot, on a thin ring in the provider's brand colour (Claude terracotta, Codex green, Mistral orange) so agents working on the same repository stay apart;
-- drag-and-drop ordering and a temporary hide action;
+- drag-and-drop ordering and a hide action that survives restarts until the session becomes active again;
 - right-click to rename a card (the prompt shows the conversation title and full path; an empty name restores the repository name);
+- sessions sharing a working directory fold into one group card: the pill is split into equal stripes (one per member state), the indicator shows the member count ringed by provider colours, and hovering unfolds a menu of the members above the bar, each with its own details, focus, hide and rename;
 - click-to-focus for the host terminal or IDE.
 
 There is no tray icon, analytics, conversation storage, or session history.
@@ -17,7 +18,7 @@ There is no tray icon, analytics, conversation storage, or session history.
 
 This repository contains the v0.1 implementation:
 
-- extensible `AgentProvider` interface, multi-provider aggregation and in-memory `AgentStore`;
+- extensible `AgentProvider` interface, multi-provider aggregation and an `AgentStore` that persists only hidden session IDs;
 - `.cstatus`-compatible Claude provider with PID validation and filesystem watching;
 - native Claude hook/status-line helper;
 - native Codex lifecycle hooks with context metrics and deep-link focusing;
@@ -102,7 +103,7 @@ The integration follows Mistral's [hook definitions](https://github.com/mistrala
 
 | Crate | Role |
 | --- | --- |
-| `agentsmon-core` | Provider-neutral models and in-memory ordering/hiding/renaming store |
+| `agentsmon-core` | Provider-neutral models and ordering/hiding/renaming store (hidden IDs persisted by the app) |
 | `agentsmon-providers` | Provider trait, Claude/Codex/Vibe discovery, presentation assets, watchers and OS focus |
 | `agentsmon-ui` | GPUI bars, context ring, drag/drop and diagnostics |
 | `agentsmon-helper` | Claude/Codex/Vibe hook and status-line helper executable |

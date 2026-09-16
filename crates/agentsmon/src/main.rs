@@ -4,14 +4,14 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use agentsmon_core::{AgentStore, ProviderStatus};
+use agentsmon_core::{AgentStore, GroupKey, ProviderStatus, Slot};
 use agentsmon_providers::{
     AgentProvider, ClaudeProvider, CodexProvider, ProviderWatcher, VibeProvider,
 };
 use agentsmon_ui::{
-    agent_details_height, natural_width, provider_details_height, rename_height,
-    rename_key_bindings, AgentDetailsView, MonitorEvent, MonitorView, ProviderDetailsView,
-    RenameEvent, RenameView,
+    agent_details_height, menu_size, natural_width, provider_details_height, rename_height,
+    rename_key_bindings, AgentDetailsView, Layout, MonitorEvent, MonitorView, ProviderDetailsView,
+    RenameEvent, RenameKey, RenameTarget, RenameView,
 };
 use gpui::{
     actions, point, px, size, AnyWindowHandle, App, AppContext, AsyncApp, Bounds, DisplayId,
@@ -27,10 +27,15 @@ const SCREEN_INSET: f32 = 0.0;
 const DETAILS_WIDTH: f32 = 400.0;
 const DETAILS_GAP: f32 = 6.0;
 const RENAME_WINDOW_TITLE: &str = "Renommer la conversation";
+const MENU_WINDOW_TITLE: &str = "Conversations du groupe";
+/// How long the pointer may be outside both a group card and its menu before
+/// the menu closes; covers the travel between the two.
+const MENU_GRACE: Duration = Duration::from_millis(300);
 const WATCHED_POLL_INTERVAL: Duration = Duration::from_secs(10);
 const FALLBACK_POLL_INTERVAL: Duration = Duration::from_secs(3);
 const CHANGE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
+mod hidden_sessions;
 mod notification;
 
 struct Panel {
@@ -45,6 +50,21 @@ struct Panel {
 #[derive(Clone)]
 struct AppState(Rc<AppStateInner>);
 
+/// The popup listing the members of a group card, with the bookkeeping that
+/// keeps it open while the pointer travels from the card to the menu.
+struct GroupMenu {
+    handle: AnyWindowHandle,
+    view: Entity<MonitorView>,
+    key: GroupKey,
+    member_count: usize,
+    display_id: DisplayId,
+    display_bounds: Bounds<Pixels>,
+    bounds: Bounds<Pixels>,
+    pill_hovered: bool,
+    outside_since: Option<Instant>,
+    _subscription: Subscription,
+}
+
 struct AppStateInner {
     store: RefCell<AgentStore>,
     provider_statuses: RefCell<Vec<ProviderStatus>>,
@@ -54,8 +74,11 @@ struct AppStateInner {
     x_offset: RefCell<f32>,
     details_window: RefCell<Option<AnyWindowHandle>>,
     rename_window: RefCell<Option<AnyWindowHandle>>,
+    group_menu: RefCell<Option<GroupMenu>>,
     unread: RefCell<HashSet<agentsmon_core::AgentId>>,
     notifications: notification::NativeNotifications,
+    /// Last hidden-session list written to disk, to skip redundant writes.
+    persisted_hidden: RefCell<Vec<agentsmon_core::HiddenSession>>,
 }
 
 fn main() {
@@ -86,8 +109,9 @@ fn main() {
         } else {
             FALLBACK_POLL_INTERVAL
         };
+        let (store, persisted_hidden) = restored_store();
         let state = AppState(Rc::new(AppStateInner {
-            store: RefCell::new(AgentStore::default()),
+            store: RefCell::new(store),
             provider_statuses: RefCell::new(Vec::new()),
             providers,
             watchers: RefCell::new(watchers),
@@ -95,8 +119,10 @@ fn main() {
             x_offset: RefCell::new(0.0),
             details_window: RefCell::new(None),
             rename_window: RefCell::new(None),
+            group_menu: RefCell::new(None),
             unread: RefCell::new(HashSet::new()),
             notifications: notification::NativeNotifications::new(),
+            persisted_hidden: RefCell::new(persisted_hidden),
         }));
 
         cx.on_action(|_: &Quit, cx| cx.quit());
@@ -275,10 +301,30 @@ fn spawn_refresh_loop(cx: &mut App, state: AppState, poll_interval: Duration) {
         while let Some(id) = state.0.notifications.try_clicked() {
             cx.update(|cx| focus_agent(&id, &state, cx));
         }
-        let should_close_details =
-            state.0.details_window.borrow().is_some() && !pointer_is_over_native_panel();
+        let should_close_details = state.0.details_window.borrow().is_some()
+            && !pointer_is_over_native_panel()
+            && !pointer_is_over_menu();
         if should_close_details {
             cx.update(|cx| close_details(&state, cx));
+        }
+        let menu_expired = state
+            .0
+            .group_menu
+            .borrow_mut()
+            .as_mut()
+            .is_some_and(|menu| {
+                if menu.pill_hovered || pointer_is_over_menu() {
+                    menu.outside_since = None;
+                    false
+                } else {
+                    menu.outside_since
+                        .get_or_insert_with(Instant::now)
+                        .elapsed()
+                        >= MENU_GRACE
+                }
+            });
+        if menu_expired {
+            cx.update(|cx| close_group_menu(&state, cx));
         }
         let changed = state
             .0
@@ -310,26 +356,87 @@ fn spawn_refresh_loop(cx: &mut App, state: AppState, poll_interval: Duration) {
     .detach();
 }
 
+/// Build the store with the sessions hidden during the previous run. Dead
+/// sessions drop out on the first refresh, which then rewrites the file.
+fn restored_store() -> (AgentStore, Vec<agentsmon_core::HiddenSession>) {
+    let hidden = match hidden_sessions::path() {
+        Ok(path) => hidden_sessions::load_from(&path),
+        Err(error) => {
+            tracing::warn!(%error, "hidden sessions are not persisted");
+            Vec::new()
+        }
+    };
+    let mut store = AgentStore::default();
+    store.restore_hidden(hidden.iter().cloned());
+    (store, hidden)
+}
+
+/// Write the hidden-session list when it changed since the last write.
+fn persist_hidden(state: &AppState) {
+    let hidden = state.0.store.borrow().hidden_sessions();
+    if *state.0.persisted_hidden.borrow() == hidden {
+        return;
+    }
+    let result = hidden_sessions::path().and_then(|path| hidden_sessions::save_to(&path, &hidden));
+    match result {
+        Ok(()) => *state.0.persisted_hidden.borrow_mut() = hidden,
+        Err(error) => tracing::warn!(%error, "cannot save hidden sessions"),
+    }
+}
+
 fn broadcast(state: &AppState, cx: &mut App) {
-    let agents = state.0.store.borrow().visible();
+    persist_hidden(state);
+    let slots = state.0.store.borrow().visible_slots();
     let providers = state.0.provider_statuses.borrow().clone();
     let unread = state.0.unread.borrow().clone();
     for panel in state.0.panels.borrow().iter() {
         panel.view.update(cx, |view, cx| {
-            view.set_data(agents.clone(), providers.clone(), unread.clone(), cx)
+            view.set_data(slots.clone(), providers.clone(), unread.clone(), cx)
         });
-        let width = natural_width(&agents, &providers, panel.max_width);
+        let width = natural_width(&slots, &providers, panel.max_width);
         let _ = cx.update_window(panel.handle, |_, window, _| {
             window.resize(size(px(width), px(BAR_HEIGHT)));
         });
     }
-    let max_offset = maximum_x_offset(state, &agents);
+    refresh_group_menu(state, &providers, &unread, cx);
+    let max_offset = maximum_x_offset(state, &slots);
     let mut offset = state.0.x_offset.borrow_mut();
     *offset = (*offset).clamp(0.0, max_offset);
     move_native_panels(*offset);
 }
 
-fn maximum_x_offset(state: &AppState, agents: &[agentsmon_core::AgentSnapshot]) -> f32 {
+/// Keep an open group menu in step with the store. A change in membership
+/// would change the menu's size, so the menu closes instead of resizing.
+fn refresh_group_menu(
+    state: &AppState,
+    providers: &[ProviderStatus],
+    unread: &HashSet<agentsmon_core::AgentId>,
+    cx: &mut App,
+) {
+    let open = state
+        .0
+        .group_menu
+        .borrow()
+        .as_ref()
+        .map(|menu| (menu.key.clone(), menu.member_count, menu.view.clone()));
+    let Some((key, member_count, view)) = open else {
+        return;
+    };
+    let members = state.0.store.borrow().group_members(&key);
+    if members.len() != member_count {
+        close_group_menu(state, cx);
+        return;
+    }
+    let slots: Vec<Slot> = members
+        .into_iter()
+        .map(|member| Slot::Single(Box::new(member)))
+        .collect();
+    view.update(cx, |view, cx| {
+        view.set_data(slots, providers.to_vec(), unread.clone(), cx)
+    });
+}
+
+fn maximum_x_offset(state: &AppState, slots: &[Slot]) -> f32 {
     let providers = state.0.provider_statuses.borrow();
     state
         .0
@@ -338,7 +445,7 @@ fn maximum_x_offset(state: &AppState, agents: &[agentsmon_core::AgentSnapshot]) 
         .iter()
         .map(|panel| {
             panel.display_bounds.size.width.as_f32()
-                - natural_width(agents, &providers, panel.max_width)
+                - natural_width(slots, &providers, panel.max_width)
         })
         .fold(f32::INFINITY, f32::min)
         .max(0.0)
@@ -359,19 +466,41 @@ fn handle_event(
             state.0.store.borrow_mut().hide(id);
             broadcast(state, cx);
         }
+        MonitorEvent::HideGroup(key) => {
+            close_group_menu(state, cx);
+            state.0.store.borrow_mut().hide_group(key);
+            broadcast(state, cx);
+        }
         MonitorEvent::Reorder { dragged, before } => {
             state.0.store.borrow_mut().reorder(dragged, before.as_ref());
             broadcast(state, cx);
         }
         MonitorEvent::MoveBarBy(delta) => {
             close_details(state, cx);
-            let agents = state.0.store.borrow().visible();
-            let max_offset = maximum_x_offset(state, &agents);
+            close_group_menu(state, cx);
+            let slots = state.0.store.borrow().visible_slots();
+            let max_offset = maximum_x_offset(state, &slots);
             let mut offset = state.0.x_offset.borrow_mut();
             *offset = (*offset + delta).clamp(0.0, max_offset);
             move_native_panels(*offset);
         }
+        MonitorEvent::ShowGroup { key, anchor_x } => {
+            open_group_menu(
+                state,
+                display_id,
+                display_bounds,
+                *anchor_x,
+                key.clone(),
+                cx,
+            );
+        }
+        MonitorEvent::LeaveGroup => {
+            if let Some(menu) = state.0.group_menu.borrow_mut().as_mut() {
+                menu.pill_hovered = false;
+            }
+        }
         MonitorEvent::ShowDetails { agent, anchor_x } => {
+            close_group_menu(state, cx);
             open_details(
                 state,
                 display_id,
@@ -382,6 +511,7 @@ fn handle_event(
             );
         }
         MonitorEvent::ShowProviderDetails { provider, anchor_x } => {
+            close_group_menu(state, cx);
             open_provider_details(
                 state,
                 display_id,
@@ -392,16 +522,162 @@ fn handle_event(
             );
         }
         MonitorEvent::HideDetails => close_details(state, cx),
-        MonitorEvent::Rename { agent, anchor_x } => {
+        MonitorEvent::Rename { target, anchor_x } => {
+            close_group_menu(state, cx);
             open_rename(
                 state,
                 display_id,
                 display_bounds,
                 *anchor_x,
-                agent.as_ref().clone(),
+                target.as_ref().clone(),
                 cx,
             );
         }
+    }
+}
+
+/// Events from the menu listing a group's members. Details open beside the
+/// menu rather than above the bar, where they would cover the other members.
+fn handle_menu_event(event: &MonitorEvent, state: &AppState, cx: &mut App) {
+    match event {
+        MonitorEvent::Focus(id) => {
+            close_details(state, cx);
+            close_group_menu(state, cx);
+            focus_agent(id, state, cx);
+        }
+        MonitorEvent::Hide(id) => {
+            state.0.store.borrow_mut().hide(id);
+            broadcast(state, cx);
+        }
+        MonitorEvent::ShowDetails { agent, .. } => {
+            open_details_beside_menu(state, agent.as_ref().clone(), cx);
+        }
+        MonitorEvent::HideDetails => close_details(state, cx),
+        MonitorEvent::Rename { target, anchor_x } => {
+            let placement = state.0.group_menu.borrow().as_ref().map(|menu| {
+                (
+                    menu.display_id,
+                    menu.display_bounds,
+                    menu.bounds.origin.x.as_f32() + anchor_x
+                        - menu.display_bounds.origin.x.as_f32()
+                        - *state.0.x_offset.borrow(),
+                )
+            });
+            close_group_menu(state, cx);
+            if let Some((display_id, display_bounds, anchor_x)) = placement {
+                open_rename(
+                    state,
+                    display_id,
+                    display_bounds,
+                    anchor_x,
+                    target.as_ref().clone(),
+                    cx,
+                );
+            }
+        }
+        MonitorEvent::HideGroup(_)
+        | MonitorEvent::Reorder { .. }
+        | MonitorEvent::MoveBarBy(_)
+        | MonitorEvent::ShowProviderDetails { .. }
+        | MonitorEvent::ShowGroup { .. }
+        | MonitorEvent::LeaveGroup => {}
+    }
+}
+
+fn close_group_menu(state: &AppState, cx: &mut App) {
+    if let Some(menu) = state.0.group_menu.borrow_mut().take() {
+        let _ = cx.update_window(menu.handle, |_, window, _| window.remove_window());
+    }
+}
+
+fn open_group_menu(
+    state: &AppState,
+    display_id: DisplayId,
+    display_bounds: Bounds<Pixels>,
+    anchor_x: f32,
+    key: GroupKey,
+    cx: &mut App,
+) {
+    if let Some(menu) = state.0.group_menu.borrow_mut().as_mut() {
+        if menu.key == key {
+            menu.pill_hovered = true;
+            menu.outside_since = None;
+            return;
+        }
+    }
+    close_group_menu(state, cx);
+    close_details(state, cx);
+    if state.0.rename_window.borrow().is_some() {
+        return;
+    }
+    let members = state.0.store.borrow().group_members(&key);
+    if members.len() < 2 {
+        return;
+    }
+    let (width, height) = menu_size(&members);
+    let panel_x = display_bounds.origin.x.as_f32() + *state.0.x_offset.borrow();
+    let min_x = display_bounds.origin.x.as_f32() + 6.0;
+    let max_x = (display_bounds.origin.x + display_bounds.size.width).as_f32() - width - 6.0;
+    let x = (panel_x + anchor_x - width / 2.0).clamp(min_x, max_x.max(min_x));
+    // The menu touches the bar so the pointer can reach it without leaving both.
+    let y = (display_bounds.origin.y + display_bounds.size.height).as_f32() - BAR_HEIGHT - height;
+    let bounds = Bounds {
+        origin: point(px(x), px(y)),
+        size: size(px(width), px(height)),
+    };
+    let options = WindowOptions {
+        titlebar: None,
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        kind: WindowKind::PopUp,
+        is_movable: false,
+        is_resizable: false,
+        is_minimizable: false,
+        focus: false,
+        show: true,
+        display_id: Some(display_id),
+        window_background: WindowBackgroundAppearance::Transparent,
+        app_id: Some("com.oliv.AgentsMon.menu".into()),
+        ..Default::default()
+    };
+    let member_count = members.len();
+    let slots: Vec<Slot> = members
+        .into_iter()
+        .map(|member| Slot::Single(Box::new(member)))
+        .collect();
+    let providers = state.0.provider_statuses.borrow().clone();
+    let unread = state.0.unread.borrow().clone();
+    let view_slot: Rc<RefCell<Option<Entity<MonitorView>>>> = Rc::new(RefCell::new(None));
+    let slot = view_slot.clone();
+    match cx.open_window(options, move |window, cx| {
+        window.set_window_title(MENU_WINDOW_TITLE);
+        let view = cx.new(|_| MonitorView::new(slots, providers, unread, Layout::Menu));
+        *slot.borrow_mut() = Some(view.clone());
+        view
+    }) {
+        Ok(handle) => {
+            let view = view_slot
+                .borrow()
+                .clone()
+                .expect("window builder sets view");
+            let event_state = state.clone();
+            let subscription = cx.subscribe(&view, move |_, event, cx| {
+                handle_menu_event(event, &event_state, cx);
+            });
+            *state.0.group_menu.borrow_mut() = Some(GroupMenu {
+                handle: handle.into(),
+                view,
+                key,
+                member_count,
+                display_id,
+                display_bounds,
+                bounds,
+                pill_hovered: true,
+                outside_since: None,
+                _subscription: subscription,
+            });
+            configure_native_menu();
+        }
+        Err(error) => tracing::warn!(%error, "cannot open group menu"),
     }
 }
 
@@ -416,7 +692,7 @@ fn open_rename(
     display_id: DisplayId,
     display_bounds: Bounds<Pixels>,
     anchor_x: f32,
-    agent: agentsmon_core::AgentSnapshot,
+    target: RenameTarget,
     cx: &mut App,
 ) {
     close_details(state, cx);
@@ -451,18 +727,19 @@ fn open_rename(
         app_id: Some("com.oliv.AgentsMon.rename".into()),
         ..Default::default()
     };
-    let provider_name = state
-        .0
-        .providers
-        .iter()
-        .find(|provider| provider.id() == agent.id.provider)
-        .map(|provider| provider.display_name().to_string())
-        .unwrap_or_else(|| agent.id.provider.clone());
+    let provider_names: Vec<String> = match &target {
+        RenameTarget::Session(agent) => vec![provider_display_name(state, &agent.id.provider)],
+        RenameTarget::Group(group) => group
+            .members
+            .iter()
+            .map(|member| provider_display_name(state, &member.id.provider))
+            .collect(),
+    };
     let entity_slot = Rc::new(RefCell::new(None));
     let slot = entity_slot.clone();
     match cx.open_window(options, move |window, cx| {
         window.set_window_title(RENAME_WINDOW_TITLE);
-        let entity = cx.new(|cx| RenameView::new(agent, provider_name, window, cx));
+        let entity = cx.new(|cx| RenameView::new(target, provider_names, window, cx));
         *slot.borrow_mut() = Some(entity.clone());
         entity
     }) {
@@ -475,8 +752,15 @@ fn open_rename(
             let event_state = state.clone();
             cx.subscribe(&entity, move |_, event, cx| {
                 match event {
-                    RenameEvent::Submit { id, name } => {
-                        event_state.0.store.borrow_mut().rename(id, name);
+                    RenameEvent::Submit { target, name } => {
+                        match target {
+                            RenameKey::Session(id) => {
+                                event_state.0.store.borrow_mut().rename(id, name)
+                            }
+                            RenameKey::Group(key) => {
+                                event_state.0.store.borrow_mut().rename_group(key, name)
+                            }
+                        }
                         broadcast(&event_state, cx);
                     }
                     RenameEvent::Cancel => {}
@@ -487,6 +771,16 @@ fn open_rename(
         }
         Err(error) => tracing::warn!(%error, "cannot open rename prompt"),
     }
+}
+
+fn provider_display_name(state: &AppState, provider_id: &str) -> String {
+    state
+        .0
+        .providers
+        .iter()
+        .find(|provider| provider.id() == provider_id)
+        .map(|provider| provider.display_name().to_string())
+        .unwrap_or_else(|| provider_id.to_owned())
 }
 
 fn focus_agent(id: &agentsmon_core::AgentId, state: &AppState, cx: &mut App) {
@@ -529,15 +823,50 @@ fn open_details(
     agent: agentsmon_core::AgentSnapshot,
     cx: &mut App,
 ) {
-    if state.0.rename_window.borrow().is_some() {
-        return;
-    }
-    close_details(state, cx);
     let panel_x = display_bounds.origin.x.as_f32() + *state.0.x_offset.borrow();
     let min_x = display_bounds.origin.x.as_f32() + 6.0;
     let max_x =
         (display_bounds.origin.x + display_bounds.size.width).as_f32() - DETAILS_WIDTH - 6.0;
     let x = (panel_x + anchor_x - DETAILS_WIDTH / 2.0).clamp(min_x, max_x.max(min_x));
+    open_details_at(state, display_id, display_bounds, x, agent, cx);
+}
+
+/// Details of a menu entry: to the right of the menu (left when the screen
+/// edge is too close), bottom-aligned with the usual popups.
+fn open_details_beside_menu(state: &AppState, agent: agentsmon_core::AgentSnapshot, cx: &mut App) {
+    let placement = state
+        .0
+        .group_menu
+        .borrow()
+        .as_ref()
+        .map(|menu| (menu.display_id, menu.display_bounds, menu.bounds));
+    let Some((display_id, display_bounds, menu_bounds)) = placement else {
+        return;
+    };
+    let min_x = display_bounds.origin.x.as_f32() + 6.0;
+    let max_x =
+        (display_bounds.origin.x + display_bounds.size.width).as_f32() - DETAILS_WIDTH - 6.0;
+    let right = (menu_bounds.origin.x + menu_bounds.size.width).as_f32() + DETAILS_GAP;
+    let x = if right <= max_x {
+        right
+    } else {
+        (menu_bounds.origin.x.as_f32() - DETAILS_GAP - DETAILS_WIDTH).max(min_x)
+    };
+    open_details_at(state, display_id, display_bounds, x, agent, cx);
+}
+
+fn open_details_at(
+    state: &AppState,
+    display_id: DisplayId,
+    display_bounds: Bounds<Pixels>,
+    x: f32,
+    agent: agentsmon_core::AgentSnapshot,
+    cx: &mut App,
+) {
+    if state.0.rename_window.borrow().is_some() {
+        return;
+    }
+    close_details(state, cx);
     let height = agent_details_height(&agent);
     let y = (display_bounds.origin.y + display_bounds.size.height).as_f32()
         - BAR_HEIGHT
@@ -560,13 +889,7 @@ fn open_details(
         app_id: Some("com.oliv.AgentsMon.details".into()),
         ..Default::default()
     };
-    let provider_name = state
-        .0
-        .providers
-        .iter()
-        .find(|provider| provider.id() == agent.id.provider)
-        .map(|provider| provider.display_name().to_string())
-        .unwrap_or_else(|| agent.id.provider.clone());
+    let provider_name = provider_display_name(state, &agent.id.provider);
     match cx.open_window(options, move |_, cx| {
         cx.new(|_| AgentDetailsView::new(agent, provider_name))
     }) {
@@ -646,18 +969,19 @@ fn reconcile_displays(cx: &mut App, state: &AppState, force: bool) {
     }
     close_details(state, cx);
     close_rename(state, cx);
+    close_group_menu(state, cx);
 
     for panel in state.0.panels.borrow_mut().drain(..) {
         let _ = cx.update_window(panel.handle, |_, window, _| window.remove_window());
     }
 
-    let agents = state.0.store.borrow().visible();
+    let slots = state.0.store.borrow().visible_slots();
     let providers = state.0.provider_statuses.borrow().clone();
     let unread = state.0.unread.borrow().clone();
     for display in displays {
         let bounds = display.bounds();
         let max_width = (bounds.size.width.as_f32() - SCREEN_INSET * 2.0).max(76.0);
-        let width = natural_width(&agents, &providers, max_width);
+        let width = natural_width(&slots, &providers, max_width);
         let x_offset = (*state.0.x_offset.borrow()).clamp(0.0, (max_width - width).max(0.0));
         let window_bounds = Bounds {
             origin: point(
@@ -683,11 +1007,12 @@ fn reconcile_displays(cx: &mut App, state: &AppState, force: bool) {
 
         let view_slot: Rc<RefCell<Option<Entity<MonitorView>>>> = Rc::new(RefCell::new(None));
         let slot = view_slot.clone();
-        let initial = agents.clone();
+        let initial = slots.clone();
         let initial_providers = providers.clone();
         let initial_unread = unread.clone();
         match cx.open_window(options, move |_, cx| {
-            let view = cx.new(|_| MonitorView::new(initial, initial_providers, initial_unread));
+            let view = cx
+                .new(|_| MonitorView::new(initial, initial_providers, initial_unread, Layout::Bar));
             *slot.borrow_mut() = Some(view.clone());
             view
         }) {
@@ -910,6 +1235,171 @@ fn configure_native_rename() {
 
 #[cfg(not(target_os = "macos"))]
 fn configure_native_rename() {}
+
+/// The group menu behaves like the bars: floating, on every space, and a
+/// non-activating panel so clicking a member never brings AgentsMon forward.
+#[cfg(target_os = "macos")]
+fn configure_native_menu() {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{
+        NSApplication, NSFloatingWindowLevel, NSWindowCollectionBehavior, NSWindowStyleMask,
+    };
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    for index in 0..app.windows().count() {
+        let window = app.windows().objectAtIndex(index);
+        if window.title().to_string() != MENU_WINDOW_TITLE {
+            continue;
+        }
+        let Some(screen) = window.screen() else {
+            continue;
+        };
+        window.setLevel(NSFloatingWindowLevel);
+        window.setStyleMask(NSWindowStyleMask::NonactivatingPanel);
+        window.setHasShadow(true);
+        window.setCollectionBehavior(
+            window.collectionBehavior()
+                | NSWindowCollectionBehavior::CanJoinAllSpaces
+                | NSWindowCollectionBehavior::FullScreenAuxiliary
+                | NSWindowCollectionBehavior::IgnoresCycle,
+        );
+        let mut origin = window.frame().origin;
+        origin.y = screen.frame().origin.y + f64::from(BAR_HEIGHT);
+        window.setFrameOrigin(origin);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn pointer_is_over_menu() -> bool {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSEvent};
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        return false;
+    };
+    let pointer = NSEvent::mouseLocation();
+    let app = NSApplication::sharedApplication(mtm);
+    for index in 0..app.windows().count() {
+        let window = app.windows().objectAtIndex(index);
+        if window.title().to_string() != MENU_WINDOW_TITLE {
+            continue;
+        }
+        let frame = window.frame();
+        if pointer.x >= frame.origin.x
+            && pointer.x <= frame.origin.x + frame.size.width
+            && pointer.y >= frame.origin.y
+            && pointer.y <= frame.origin.y + frame.size.height
+        {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn window_title(hwnd: windows::Win32::Foundation::HWND) -> String {
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowTextW;
+    let mut buffer = [0u16; 128];
+    let length = unsafe { GetWindowTextW(hwnd, &mut buffer) }.max(0) as usize;
+    String::from_utf16_lossy(&buffer[..length.min(buffer.len())])
+}
+
+#[cfg(target_os = "windows")]
+fn configure_native_menu() {
+    use windows::core::BOOL;
+    use windows::Win32::Foundation::{HWND, LPARAM};
+    use windows::Win32::System::Threading::GetCurrentProcessId;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowLongPtrW, GetWindowThreadProcessId, SetWindowLongPtrW, SetWindowPos,
+        GWL_EXSTYLE, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WS_EX_NOACTIVATE,
+        WS_EX_TOOLWINDOW,
+    };
+
+    unsafe extern "system" fn each(hwnd: HWND, raw: LPARAM) -> BOOL {
+        let pid = raw.0 as u32;
+        let mut owner = 0u32;
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut owner)) };
+        if owner == pid && window_title(hwnd) == MENU_WINDOW_TITLE {
+            let style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
+            let style = style | WS_EX_NOACTIVATE.0 | WS_EX_TOOLWINDOW.0;
+            unsafe {
+                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style as isize);
+                let _ = SetWindowPos(
+                    hwnd,
+                    Some(HWND_TOPMOST),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                );
+            }
+        }
+        BOOL(1)
+    }
+
+    let pid = unsafe { GetCurrentProcessId() };
+    let _ = unsafe { EnumWindows(Some(each), LPARAM(pid as isize)) };
+}
+
+#[cfg(target_os = "windows")]
+fn pointer_is_over_menu() -> bool {
+    use windows::core::BOOL;
+    use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
+    use windows::Win32::System::Threading::GetCurrentProcessId;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetCursorPos, GetWindowRect, GetWindowThreadProcessId,
+    };
+
+    #[repr(C)]
+    struct Context {
+        pid: u32,
+        pointer: POINT,
+        hovered: bool,
+    }
+
+    unsafe extern "system" fn each(hwnd: HWND, raw: LPARAM) -> BOOL {
+        let context = unsafe { &mut *(raw.0 as *mut Context) };
+        let mut owner = 0u32;
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut owner)) };
+        let mut rect = RECT::default();
+        if owner == context.pid
+            && window_title(hwnd) == MENU_WINDOW_TITLE
+            && unsafe { GetWindowRect(hwnd, &mut rect) }.is_ok()
+            && context.pointer.x >= rect.left
+            && context.pointer.x <= rect.right
+            && context.pointer.y >= rect.top
+            && context.pointer.y <= rect.bottom
+        {
+            context.hovered = true;
+            return BOOL(0);
+        }
+        BOOL(1)
+    }
+
+    let mut pointer = POINT::default();
+    if unsafe { GetCursorPos(&mut pointer) }.is_err() {
+        return false;
+    }
+    let mut context = Context {
+        pid: unsafe { GetCurrentProcessId() },
+        pointer,
+        hovered: false,
+    };
+    let _ = unsafe { EnumWindows(Some(each), LPARAM((&mut context as *mut Context) as isize)) };
+    context.hovered
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn configure_native_menu() {}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn pointer_is_over_menu() -> bool {
+    true
+}
 
 #[cfg(target_os = "windows")]
 fn configure_native_details() {

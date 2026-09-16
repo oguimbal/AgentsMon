@@ -2,7 +2,7 @@ mod model;
 mod store;
 
 pub use model::{
-    AgentId, AgentSnapshot, AgentState, ContextUsage, FocusTarget, ProviderStatus, ProviderUsage,
-    UsageLimit,
+    group_sessions, AgentId, AgentSnapshot, AgentState, ContextUsage, FocusTarget, GroupKey,
+    ProviderStatus, ProviderUsage, SessionGroup, Slot, UsageLimit,
 };
-pub use store::AgentStore;
+pub use store::{AgentStore, HiddenSession};

@@ -7,24 +7,57 @@ use std::f32::consts::PI;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use agentsmon_core::{
-    AgentId, AgentSnapshot, AgentState, ProviderStatus, ProviderUsage, UsageLimit,
+    AgentId, AgentSnapshot, AgentState, GroupKey, ProviderStatus, ProviderUsage, SessionGroup,
+    Slot, UsageLimit,
 };
 use gpui::prelude::*;
 use gpui::{
-    canvas, div, img, point, px, rgb, rgba, Context, DragMoveEvent, Entity, EventEmitter,
-    Focusable, Hsla, Image, ImageFormat, IntoElement, MouseButton, MouseDownEvent, PathBuilder,
-    Render, SharedString, Subscription, Window,
+    canvas, div, fill, img, point, px, rgb, rgba, size, AnyElement, Bounds, ContentMask, Context,
+    Corners, DragMoveEvent, Entity, EventEmitter, Focusable, Hsla, Image, ImageFormat, IntoElement,
+    MouseButton, MouseDownEvent, PathBuilder, Render, SharedString, Subscription, Window,
 };
 
 pub use text_input::key_bindings as rename_key_bindings;
 use text_input::{TextInput, TextInputEvent};
 
+/// What a rename prompt edits.
+#[derive(Debug, Clone)]
+pub enum RenameTarget {
+    Session(Box<AgentSnapshot>),
+    Group(SessionGroup),
+}
+
+impl RenameTarget {
+    fn label(&self) -> &str {
+        match self {
+            RenameTarget::Session(agent) => agent.label(),
+            RenameTarget::Group(group) => group.label(),
+        }
+    }
+
+    fn key(&self) -> RenameKey {
+        match self {
+            RenameTarget::Session(agent) => RenameKey::Session(agent.id.clone()),
+            RenameTarget::Group(group) => RenameKey::Group(group.key.clone()),
+        }
+    }
+}
+
+/// Where a submitted name goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenameKey {
+    Session(AgentId),
+    Group(GroupKey),
+}
+
 #[derive(Debug, Clone)]
 pub enum MonitorEvent {
     Focus(AgentId),
     Hide(AgentId),
+    HideGroup(GroupKey),
+    /// Move the dragged card (all its sessions, kept together) before `before`.
     Reorder {
-        dragged: AgentId,
+        dragged: Vec<AgentId>,
         before: Option<AgentId>,
     },
     MoveBarBy(f32),
@@ -37,42 +70,65 @@ pub enum MonitorEvent {
         anchor_x: f32,
     },
     HideDetails,
-    /// Right click on a card: open the rename prompt for that session.
+    /// Pointer entered a group card: open (or keep) the menu listing its members.
+    ShowGroup {
+        key: GroupKey,
+        anchor_x: f32,
+    },
+    /// Pointer left a group card. The menu stays while the pointer reaches it.
+    LeaveGroup,
+    /// Right click on a card: open the rename prompt.
     Rename {
-        agent: Box<AgentSnapshot>,
+        target: Box<RenameTarget>,
         anchor_x: f32,
     },
 }
 
+/// How a `MonitorView` lays its cards out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layout {
+    /// The horizontal bar at the bottom of a display.
+    Bar,
+    /// The vertical list of a group's members, shown above the bar.
+    Menu,
+}
+
 pub struct MonitorView {
-    agents: Vec<AgentSnapshot>,
+    slots: Vec<Slot>,
     providers: Vec<ProviderStatus>,
     unread: HashSet<AgentId>,
+    layout: Layout,
     bar_drag_last_x: Option<gpui::Pixels>,
 }
 
+/// Drag payload: the sessions of the dragged card, in bar order.
+#[derive(Clone)]
+struct DragSlot(Vec<AgentId>);
+
 impl MonitorView {
     pub fn new(
-        agents: Vec<AgentSnapshot>,
+        slots: Vec<Slot>,
         providers: Vec<ProviderStatus>,
         unread: HashSet<AgentId>,
+        layout: Layout,
     ) -> Self {
         Self {
-            agents,
+            slots,
             providers,
             unread,
+            layout,
             bar_drag_last_x: None,
         }
     }
 
     pub fn set_data(
         &mut self,
-        agents: Vec<AgentSnapshot>,
+        slots: Vec<Slot>,
         providers: Vec<ProviderStatus>,
         unread: HashSet<AgentId>,
         cx: &mut Context<Self>,
     ) {
-        self.agents = agents;
+        self.slots = slots;
         self.providers = providers;
         self.unread = unread;
         cx.notify();
@@ -115,21 +171,65 @@ impl MonitorView {
             .child(provider_ring(provider.icon_png, usage))
     }
 
+    fn render_slot(&self, slot: Slot, cx: &mut Context<Self>) -> AnyElement {
+        match slot {
+            Slot::Single(agent) => self.render_card(*agent, cx).into_any_element(),
+            Slot::Group(group) => self.render_group(group, cx).into_any_element(),
+        }
+    }
+
+    /// Drag-and-drop reordering, only meaningful in the bar.
+    fn draggable(
+        &self,
+        card: gpui::Stateful<gpui::Div>,
+        ids: Vec<AgentId>,
+        label: String,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        if self.layout != Layout::Bar {
+            return card;
+        }
+        let live_target = ids[0].clone();
+        card.on_drag(DragSlot(ids), move |_, _, _, cx| {
+            cx.new(|_| DragPreview {
+                label: label.clone(),
+            })
+        })
+        .drag_over::<DragSlot>(|style, _, _, _| style.bg(rgb(0x3a3c45)))
+        .on_drag_move::<DragSlot>(cx.listener(
+            move |this, event: &DragMoveEvent<DragSlot>, _, cx| {
+                if !event.bounds.contains(&event.event.position) {
+                    return;
+                }
+                let dragged = &event.drag(cx).0;
+                let after =
+                    event.event.position.x >= event.bounds.origin.x + event.bounds.size.width / 2.0;
+                if let Some(before) =
+                    live_reorder_destination(&this.slots, dragged, Some(&live_target), after)
+                {
+                    cx.emit(MonitorEvent::Reorder {
+                        dragged: dragged.clone(),
+                        before,
+                    });
+                }
+            },
+        ))
+    }
+
     fn render_card(&self, agent: AgentSnapshot, cx: &mut Context<Self>) -> impl IntoElement {
         let id = agent.id.clone();
         let focus_id = id.clone();
         let hide_id = id.clone();
-        let live_target = id.clone();
         let label = agent.label().to_owned();
-        let drag_label = label.clone();
         let context = agent.context_usage.map(|usage| usage.used_percentage());
         let accent = self.accent_for(&id.provider);
         let hover_details = agent.clone();
-        let rename_details = agent.clone();
+        let rename_target = RenameTarget::Session(Box::new(agent.clone()));
         let is_unread = self.unread.contains(&id);
         let state_background = state_color(agent.state);
+        let in_menu = self.layout == Layout::Menu;
 
-        div()
+        let card = div()
             .id(SharedString::from(format!(
                 "agent-{}-{}",
                 id.provider, id.session_id
@@ -143,6 +243,7 @@ impl MonitorView {
             .bg(state_background)
             .relative()
             .cursor_pointer()
+            .when(in_menu, |card| card.w_full())
             .on_mouse_move(|_, _, cx| cx.stop_propagation())
             .on_hover(cx.listener(move |_, hovered: &bool, window, cx| {
                 if *hovered {
@@ -160,89 +261,119 @@ impl MonitorView {
                 cx.listener(move |_, _: &MouseDownEvent, window, cx| {
                     cx.stop_propagation();
                     cx.emit(MonitorEvent::Rename {
-                        agent: Box::new(rename_details.clone()),
+                        target: Box::new(rename_target.clone()),
                         anchor_x: window.mouse_position().x.as_f32(),
                     });
                 }),
             )
             .on_click(cx.listener(move |_, _, _event, cx| {
                 cx.emit(MonitorEvent::Focus(focus_id.clone()));
-            }))
-            .on_drag(id.clone(), move |_, _, _, cx| {
-                cx.new(|_| DragPreview {
-                    label: drag_label.clone(),
-                })
-            })
-            .drag_over::<AgentId>(|style, _, _, _| style.bg(rgb(0x3a3c45)))
-            .on_drag_move::<AgentId>(cx.listener(
-                move |this, event: &DragMoveEvent<AgentId>, _, cx| {
-                    if !event.bounds.contains(&event.event.position) {
-                        return;
-                    }
-                    let dragged = event.drag(cx);
-                    let after = event.event.position.x
-                        >= event.bounds.origin.x + event.bounds.size.width / 2.0;
-                    if let Some(before) =
-                        live_reorder_destination(&this.agents, dragged, Some(&live_target), after)
-                    {
-                        cx.emit(MonitorEvent::Reorder {
-                            dragged: dragged.clone(),
-                            before,
-                        });
-                    }
-                },
-            ))
-            .when(is_unread, |card| {
-                card.child(
-                    div()
-                        .absolute()
-                        .top(px(-1.0))
-                        .left(px(-1.0))
-                        .size(px(5.0))
-                        .rounded_full()
-                        .bg(rgb(0xf2b84b)),
-                )
-            })
+            }));
+        self.draggable(card, vec![id.clone()], label.clone(), cx)
+            .when(is_unread, |card| card.child(unread_badge()))
             .child(
                 div()
                     .id(SharedString::from(format!("context-{}", id.session_id)))
                     .size(px(CONTEXT_INDICATOR_SIZE))
                     .child(context_pie(context, accent)),
             )
-            .child(
-                div()
-                    .max_w(px(122.0))
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .text_size(px(10.0))
-                    .text_color(rgb(0xe8e8ea))
-                    .child(SharedString::from(label)),
-            )
-            .child(
-                div()
-                    .id(SharedString::from(format!("hide-{}", hide_id.session_id)))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(px(12.0))
-                    .rounded_full()
-                    .text_size(px(10.0))
-                    .text_color(rgb(0x8d8f98))
-                    .hover(|style| style.bg(rgb(0x484a53)).text_color(rgb(0xffffff)))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        cx.stop_propagation();
-                        cx.emit(MonitorEvent::Hide(hide_id.clone()));
-                    }))
-                    .child("×"),
-            )
+            .child(card_label(label))
+            .child(close_button(
+                format!("hide-{}", hide_id.session_id),
+                cx.listener(move |_, _, _, cx| {
+                    cx.stop_propagation();
+                    cx.emit(MonitorEvent::Hide(hide_id.clone()));
+                }),
+            ))
     }
-}
 
-impl EventEmitter<MonitorEvent> for MonitorView {}
+    /// One card for several sessions: the background is split into equal
+    /// stripes, one per member state, and the indicator shows the member count
+    /// ringed by their provider colours.
+    fn render_group(&self, group: SessionGroup, cx: &mut Context<Self>) -> impl IntoElement {
+        let key = group.key.clone();
+        let label = group.label().to_owned();
+        let ids = group.ids();
+        let focus_id = group
+            .most_recent()
+            .map(|member| member.id.clone())
+            .unwrap_or_else(|| ids[0].clone());
+        let stripes: Vec<Hsla> = group
+            .members
+            .iter()
+            .map(|member| state_color(member.state))
+            .collect();
+        let accents: Vec<Option<u32>> = group
+            .members
+            .iter()
+            .map(|member| self.accent_for(&member.id.provider))
+            .collect();
+        let is_unread = group
+            .members
+            .iter()
+            .any(|member| self.unread.contains(&member.id));
+        let hover_key = key.clone();
+        let hide_key = key.clone();
+        let rename_target = RenameTarget::Group(group.clone());
+        let element_id = match &key {
+            GroupKey::Directory(cwd) => format!("group-{}", cwd.display()),
+        };
 
-impl Render for MonitorView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let card = div()
+            .id(SharedString::from(element_id.clone()))
+            .flex()
+            .items_center()
+            .gap(px(3.0))
+            .h(px(17.0))
+            .px(px(5.0))
+            .rounded_full()
+            .relative()
+            .cursor_pointer()
+            .child(group_stripes(stripes))
+            .on_mouse_move(|_, _, cx| cx.stop_propagation())
+            .on_hover(cx.listener(move |_, hovered: &bool, window, cx| {
+                if *hovered {
+                    cx.emit(MonitorEvent::ShowGroup {
+                        key: hover_key.clone(),
+                        anchor_x: window.mouse_position().x.as_f32(),
+                    });
+                } else {
+                    cx.emit(MonitorEvent::LeaveGroup);
+                }
+            }))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |_, _: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    cx.emit(MonitorEvent::Rename {
+                        target: Box::new(rename_target.clone()),
+                        anchor_x: window.mouse_position().x.as_f32(),
+                    });
+                }),
+            )
+            .on_click(cx.listener(move |_, _, _event, cx| {
+                cx.emit(MonitorEvent::Focus(focus_id.clone()));
+            }));
+        self.draggable(card, ids, label.clone(), cx)
+            .when(is_unread, |card| card.child(unread_badge()))
+            .child(
+                div()
+                    .id(SharedString::from(format!("count-{element_id}")))
+                    .size(px(CONTEXT_INDICATOR_SIZE))
+                    .child(group_indicator(group.members.len(), accents)),
+            )
+            .child(card_label(label))
+            .child(close_button(
+                format!("hide-{element_id}"),
+                cx.listener(move |_, _, _, cx| {
+                    cx.stop_propagation();
+                    cx.emit(MonitorEvent::HideGroup(hide_key.clone()));
+                }),
+            ))
+    }
+
+    fn render_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let root = div()
             .id("agentsmon-root")
             .flex()
@@ -289,7 +420,7 @@ impl Render for MonitorView {
                 root.child(div().w(px(1.0)).h(px(13.0)).bg(rgb(0x3b3d44)))
             });
 
-        if self.agents.is_empty() {
+        if self.slots.is_empty() {
             root.child(
                 div()
                     .flex()
@@ -302,25 +433,25 @@ impl Render for MonitorView {
             )
         } else {
             root.children(
-                self.agents
+                self.slots
                     .clone()
                     .into_iter()
-                    .map(|agent| self.render_card(agent, cx)),
+                    .map(|slot| self.render_slot(slot, cx)),
             )
             .child(
                 div()
                     .id("reorder-at-end")
                     .h(px(17.0))
                     .min_w(px(8.0))
-                    .drag_over::<AgentId>(|style, _, _, _| style.bg(rgb(0x3a3c45)))
-                    .on_drag_move::<AgentId>(cx.listener(
-                        |this, event: &DragMoveEvent<AgentId>, _, cx| {
+                    .drag_over::<DragSlot>(|style, _, _, _| style.bg(rgb(0x3a3c45)))
+                    .on_drag_move::<DragSlot>(cx.listener(
+                        |this, event: &DragMoveEvent<DragSlot>, _, cx| {
                             if !event.bounds.contains(&event.event.position) {
                                 return;
                             }
-                            let dragged = event.drag(cx);
+                            let dragged = &event.drag(cx).0;
                             if let Some(before) =
-                                live_reorder_destination(&this.agents, dragged, None, true)
+                                live_reorder_destination(&this.slots, dragged, None, true)
                             {
                                 cx.emit(MonitorEvent::Reorder {
                                     dragged: dragged.clone(),
@@ -332,16 +463,169 @@ impl Render for MonitorView {
             )
         }
     }
+
+    fn render_menu(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("agentsmon-menu")
+            .flex()
+            .flex_col()
+            .size_full()
+            .p(px(3.0))
+            .gap(px(3.0))
+            .rounded_md()
+            .shadow_sm()
+            .bg(rgba(0x18191df4))
+            .on_mouse_move(cx.listener(|_, _, _, cx| {
+                cx.emit(MonitorEvent::HideDetails);
+            }))
+            .children(
+                self.slots
+                    .clone()
+                    .into_iter()
+                    .map(|slot| self.render_slot(slot, cx)),
+            )
+    }
 }
 
+impl EventEmitter<MonitorEvent> for MonitorView {}
+
+impl Render for MonitorView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        match self.layout {
+            Layout::Bar => self.render_bar(cx).into_any_element(),
+            Layout::Menu => self.render_menu(cx).into_any_element(),
+        }
+    }
+}
+
+fn unread_badge() -> impl IntoElement {
+    div()
+        .absolute()
+        .top(px(-1.0))
+        .left(px(-1.0))
+        .size(px(5.0))
+        .rounded_full()
+        .bg(rgb(0xf2b84b))
+}
+
+fn card_label(label: String) -> impl IntoElement {
+    div()
+        .max_w(px(122.0))
+        .overflow_hidden()
+        .text_ellipsis()
+        .text_size(px(10.0))
+        .text_color(rgb(0xe8e8ea))
+        .child(SharedString::from(label))
+}
+
+fn close_button(
+    id: String,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(SharedString::from(id))
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(12.0))
+        .rounded_full()
+        .text_size(px(10.0))
+        .text_color(rgb(0x8d8f98))
+        .hover(|style| style.bg(rgb(0x484a53)).text_color(rgb(0xffffff)))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(on_click)
+        .child("×")
+}
+
+/// Pill background split into equal vertical stripes, each painted as the
+/// full rounded pill clipped to its share so the ends stay round.
+fn group_stripes(colors: Vec<Hsla>) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let count = colors.len().max(1);
+            let stripe = bounds.size.width / count as f32;
+            let radii = Corners::all(bounds.size.height / 2.0);
+            for (index, color) in colors.iter().enumerate() {
+                let clip = Bounds {
+                    origin: point(bounds.origin.x + stripe * index as f32, bounds.origin.y),
+                    size: size(stripe, bounds.size.height),
+                };
+                window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
+                    window.paint_quad(fill(bounds, *color).corner_radii(radii));
+                });
+            }
+        },
+    )
+    .absolute()
+    .top(px(0.0))
+    .left(px(0.0))
+    .size_full()
+}
+
+/// Member count on a dark disc, ringed by one sector per member in the
+/// provider's colour (same order as the stripes).
+fn group_indicator(count: usize, accents: Vec<Option<u32>>) -> impl IntoElement {
+    div()
+        .size(px(CONTEXT_INDICATOR_SIZE))
+        .relative()
+        .child(
+            canvas(
+                |_, _, _| {},
+                move |bounds, _, window, _| {
+                    let center = point(
+                        bounds.origin.x + bounds.size.width / 2.0,
+                        bounds.origin.y + bounds.size.height / 2.0,
+                    );
+                    let sectors = accents.len().max(1) as f32;
+                    for (index, accent) in accents.iter().enumerate() {
+                        let color = accent.unwrap_or(0x686b75);
+                        draw_sector(
+                            window,
+                            center,
+                            px(6.5),
+                            index as f32 / sectors,
+                            (index + 1) as f32 / sectors,
+                            rgb(color).into(),
+                        );
+                    }
+                    draw_filled_circle(window, center, px(5.0), rgb(0x2a2b31).into());
+                },
+            )
+            .absolute()
+            .top(px(0.0))
+            .left(px(0.0))
+            .size(px(CONTEXT_INDICATOR_SIZE)),
+        )
+        .child(
+            div()
+                .absolute()
+                .top(px(0.0))
+                .left(px(0.0))
+                .size(px(CONTEXT_INDICATOR_SIZE))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(8.0))
+                .line_height(px(8.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(rgb(0xe8e8ea))
+                .child(count.to_string()),
+        )
+}
+
+/// Where dropping the dragged card (identified by its sessions) over the card
+/// starting with `target` would put it: `Some(before)` when the bar order
+/// would change, `None` otherwise.
 fn live_reorder_destination(
-    agents: &[AgentSnapshot],
-    dragged: &AgentId,
+    slots: &[Slot],
+    dragged: &[AgentId],
     target: Option<&AgentId>,
     after_target: bool,
 ) -> Option<Option<AgentId>> {
-    let current: Vec<_> = agents.iter().map(|agent| agent.id.clone()).collect();
-    if !current.contains(dragged) {
+    let current: Vec<_> = slots.iter().map(|slot| slot.first_id().clone()).collect();
+    let dragged = dragged.first()?;
+    if !current.contains(dragged) || target == Some(dragged) {
         return None;
     }
     let mut reordered: Vec<_> = current
@@ -602,25 +886,41 @@ fn draw_pie(
     progress: f32,
     color: Hsla,
 ) {
-    let progress = progress.clamp(0.0, 1.0);
-    if progress <= 0.0 {
+    draw_sector(window, center, radius, 0.0, progress, color);
+}
+
+/// Filled sector from `from` to `to`, fractions of a turn clockwise from the top.
+fn draw_sector(
+    window: &mut Window,
+    center: gpui::Point<gpui::Pixels>,
+    radius: gpui::Pixels,
+    from: f32,
+    to: f32,
+    color: Hsla,
+) {
+    let from = from.clamp(0.0, 1.0);
+    let to = to.clamp(0.0, 1.0);
+    let span = to - from;
+    if span <= 0.0 {
         return;
     }
-    if progress >= 0.999 {
+    if span >= 0.999 {
         draw_filled_circle(window, center, radius, color);
         return;
     }
-
-    let start = point(center.x, center.y - radius);
-    let angle = -PI / 2.0 + progress * 2.0 * PI;
+    let angle = |fraction: f32| -PI / 2.0 + fraction * 2.0 * PI;
+    let start = point(
+        center.x + radius * angle(from).cos(),
+        center.y + radius * angle(from).sin(),
+    );
     let end = point(
-        center.x + radius * angle.cos(),
-        center.y + radius * angle.sin(),
+        center.x + radius * angle(to).cos(),
+        center.y + radius * angle(to).sin(),
     );
     let mut builder = PathBuilder::fill();
     builder.move_to(center);
     builder.line_to(start);
-    builder.arc_to(point(radius, radius), px(0.0), progress > 0.5, true, end);
+    builder.arc_to(point(radius, radius), px(0.0), span > 0.5, true, end);
     builder.line_to(center);
     if let Ok(path) = builder.build() {
         window.paint_path(path, color);
@@ -897,7 +1197,7 @@ fn format_reset(reset: std::time::SystemTime) -> String {
 
 #[derive(Debug, Clone)]
 pub enum RenameEvent {
-    Submit { id: AgentId, name: String },
+    Submit { target: RenameKey, name: String },
     Cancel,
 }
 
@@ -905,28 +1205,30 @@ pub enum RenameEvent {
 /// title, full path, provider and state) above a text field pre-filled with
 /// the current label, fully selected so typing replaces it.
 pub struct RenameView {
-    agent: AgentSnapshot,
-    provider_name: String,
+    target: RenameTarget,
+    provider_names: Vec<String>,
     input: Entity<TextInput>,
     was_active: bool,
     _subscriptions: Vec<Subscription>,
 }
 
 impl RenameView {
+    /// `provider_names` holds the display name of each session's provider
+    /// (one entry for a session, one per member for a group).
     pub fn new(
-        agent: AgentSnapshot,
-        provider_name: String,
+        target: RenameTarget,
+        provider_names: Vec<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let input = cx.new(|cx| TextInput::new(agent.label().to_owned(), cx));
-        let id = agent.id.clone();
+        let input = cx.new(|cx| TextInput::new(target.label().to_owned(), cx));
+        let key = target.key();
         let input_events = cx.subscribe(&input, move |this, input, event, cx| match event {
             TextInputEvent::Confirm => {
                 let name = input.read(cx).text().to_owned();
                 this.was_active = false;
                 cx.emit(RenameEvent::Submit {
-                    id: id.clone(),
+                    target: key.clone(),
                     name,
                 });
             }
@@ -945,11 +1247,60 @@ impl RenameView {
         });
         window.focus(&input.focus_handle(cx), cx);
         Self {
-            agent,
-            provider_name,
+            target,
+            provider_names,
             input,
             was_active: false,
             _subscriptions: vec![input_events, activation],
+        }
+    }
+
+    fn heading(&self) -> String {
+        match &self.target {
+            RenameTarget::Session(agent) => agent
+                .title
+                .clone()
+                .unwrap_or_else(|| agent.project_name.clone()),
+            RenameTarget::Group(group) => group.project_name.clone(),
+        }
+    }
+
+    fn path(&self) -> String {
+        let cwd = match &self.target {
+            RenameTarget::Session(agent) => Some(agent.cwd.as_path()),
+            RenameTarget::Group(group) => group.common_cwd(),
+        };
+        match cwd {
+            Some(cwd) if !cwd.as_os_str().is_empty() => cwd.display().to_string(),
+            Some(_) => "Chemin indisponible".into(),
+            None => "Plusieurs dossiers".into(),
+        }
+    }
+
+    fn meta(&self) -> String {
+        match &self.target {
+            RenameTarget::Session(agent) => {
+                let provider = self.provider_names.first().cloned().unwrap_or_default();
+                let mut meta = format!("{provider} · {}", state_label(agent.state));
+                if let Some(usage) = agent.context_usage {
+                    meta.push_str(&format!(
+                        " · contexte {} %",
+                        format_percentage(usage.used_percentage())
+                    ));
+                }
+                meta
+            }
+            RenameTarget::Group(group) => {
+                let mut providers: Vec<&str> =
+                    self.provider_names.iter().map(String::as_str).collect();
+                providers.sort_unstable();
+                providers.dedup();
+                format!(
+                    "{} conversations · {}",
+                    group.members.len(),
+                    providers.join(", ")
+                )
+            }
         }
     }
 }
@@ -958,23 +1309,6 @@ impl EventEmitter<RenameEvent> for RenameView {}
 
 impl Render for RenameView {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let agent = &self.agent;
-        let heading = agent
-            .title
-            .clone()
-            .unwrap_or_else(|| agent.project_name.clone());
-        let path = if !agent.cwd.as_os_str().is_empty() {
-            agent.cwd.display().to_string()
-        } else {
-            "Chemin indisponible".into()
-        };
-        let mut meta = format!("{} · {}", self.provider_name, state_label(agent.state));
-        if let Some(usage) = agent.context_usage {
-            meta.push_str(&format!(
-                " · contexte {} %",
-                format_percentage(usage.used_percentage())
-            ));
-        }
         div()
             .flex()
             .flex_col()
@@ -992,7 +1326,7 @@ impl Render for RenameView {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
-                    .child(heading),
+                    .child(self.heading()),
             )
             .child(
                 div()
@@ -1000,9 +1334,9 @@ impl Render for RenameView {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
-                    .child(path),
+                    .child(self.path()),
             )
-            .child(div().text_color(rgb(0x8f929c)).child(meta))
+            .child(div().text_color(rgb(0x8f929c)).child(self.meta()))
             .child(self.input.clone())
             .child(
                 div()
@@ -1048,23 +1382,35 @@ impl Render for DragPreview {
     }
 }
 
-pub fn natural_width(
-    agents: &[AgentSnapshot],
-    providers: &[ProviderStatus],
-    max_width: f32,
-) -> f32 {
+pub fn natural_width(slots: &[Slot], providers: &[ProviderStatus], max_width: f32) -> f32 {
     // Root padding + the trailing drop target, then one gap per card (including
     // the gap before that target). Keeping these outside the per-card estimate
     // prevents the last close button from being clipped.
     let provider_width = providers.len() as f32 * 20.0 + f32::from(!providers.is_empty()) * 4.0;
-    let chrome = 14.0 + agents.len() as f32 * 3.0 + provider_width;
+    let chrome = 14.0 + slots.len() as f32 * 3.0 + provider_width;
     let content = chrome
-        + agents
+        + slots
             .iter()
-            .map(|agent| 44.0 + agent.label().chars().count().min(27) as f32 * 5.5)
+            .map(|slot| card_width(slot.label()))
             .sum::<f32>()
-        + if agents.is_empty() { 55.0 } else { 0.0 };
+        + if slots.is_empty() { 55.0 } else { 0.0 };
     content.clamp(76.0, max_width.max(76.0))
+}
+
+/// Estimated width of one card for the given label.
+fn card_width(label: &str) -> f32 {
+    44.0 + label.chars().count().min(27) as f32 * 5.5
+}
+
+/// Size of the menu window listing a group's members as vertical cards.
+pub fn menu_size(members: &[AgentSnapshot]) -> (f32, f32) {
+    let widest = members
+        .iter()
+        .map(|member| card_width(member.label()))
+        .fold(0.0, f32::max);
+    let width = 6.0 + widest + 4.0;
+    let height = 6.0 + members.len() as f32 * 17.0 + members.len().saturating_sub(1) as f32 * 3.0;
+    (width.max(76.0), height)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1306,6 +1652,10 @@ mod tests {
         }
     }
 
+    fn single(id: &str) -> Slot {
+        Slot::Single(Box::new(snapshot(id)))
+    }
+
     #[test]
     fn empty_and_overflow_widths_are_bounded() {
         assert_eq!(natural_width(&[], &[], 900.0), 76.0);
@@ -1323,15 +1673,32 @@ mod tests {
             last_activity: std::time::SystemTime::UNIX_EPOCH,
         };
         assert_eq!(
-            natural_width(&vec![snapshot.clone(); 20], &[], 500.0),
+            natural_width(
+                &vec![Slot::Single(Box::new(snapshot.clone())); 20],
+                &[],
+                500.0
+            ),
             500.0
         );
         snapshot.project_name = "a".into();
-        assert!(natural_width(&[snapshot.clone()], &[], 500.0) >= 76.0);
+        assert!(natural_width(&[Slot::Single(Box::new(snapshot.clone()))], &[], 500.0) >= 76.0);
         // The bar is sized on the label the card shows, not the project name.
-        let narrow = natural_width(&[snapshot.clone()], &[], 900.0);
+        let narrow = natural_width(&[Slot::Single(Box::new(snapshot.clone()))], &[], 900.0);
         snapshot.custom_name = Some("un nom nettement plus long".into());
-        assert!(natural_width(&[snapshot], &[], 900.0) > narrow);
+        assert!(natural_width(&[Slot::Single(Box::new(snapshot))], &[], 900.0) > narrow);
+    }
+
+    #[test]
+    fn menu_grows_with_members_and_their_labels() {
+        let mut long = snapshot("b");
+        long.custom_name = Some("une conversation au nom long".into());
+        let (width, height) = menu_size(&[snapshot("a"), long.clone()]);
+        assert_eq!(height, 6.0 + 2.0 * 17.0 + 3.0);
+        assert!(width > menu_size(&[snapshot("a"), snapshot("c")]).0);
+        assert_eq!(
+            menu_size(&[snapshot("a"), long, snapshot("c")]).1,
+            6.0 + 3.0 * 17.0 + 6.0
+        );
     }
 
     #[test]
@@ -1393,24 +1760,66 @@ mod tests {
 
     #[test]
     fn live_reorder_uses_the_target_half_and_avoids_duplicate_updates() {
-        let agents = vec![snapshot("a"), snapshot("b"), snapshot("c")];
+        let slots = vec![single("a"), single("b"), single("c")];
         let a = AgentId::new("claude", "a");
         let b = AgentId::new("claude", "b");
         let c = AgentId::new("claude", "c");
 
         assert_eq!(
-            live_reorder_destination(&agents, &a, Some(&b), true),
+            live_reorder_destination(&slots, std::slice::from_ref(&a), Some(&b), true),
             Some(Some(c.clone()))
         );
         assert_eq!(
-            live_reorder_destination(&agents, &c, Some(&b), false),
+            live_reorder_destination(&slots, std::slice::from_ref(&c), Some(&b), false),
             Some(Some(b.clone()))
         );
-        assert_eq!(live_reorder_destination(&agents, &a, Some(&b), false), None);
         assert_eq!(
-            live_reorder_destination(&agents, &a, None, true),
+            live_reorder_destination(&slots, std::slice::from_ref(&a), Some(&b), false),
+            None
+        );
+        assert_eq!(
+            live_reorder_destination(&slots, std::slice::from_ref(&a), None, true),
             Some(None)
         );
-        assert_eq!(live_reorder_destination(&agents, &c, None, true), None);
+        assert_eq!(
+            live_reorder_destination(&slots, std::slice::from_ref(&c), None, true),
+            None
+        );
+        assert_eq!(
+            live_reorder_destination(&slots, std::slice::from_ref(&a), Some(&a), true),
+            None
+        );
+        assert_eq!(live_reorder_destination(&slots, &[], Some(&a), true), None);
+    }
+
+    #[test]
+    fn live_reorder_moves_groups_as_one_card() {
+        let mut d = snapshot("d");
+        d.cwd = "/tmp/a".into();
+        let group = Slot::Group(SessionGroup {
+            key: GroupKey::Directory("/tmp/a".into()),
+            project_name: "a".into(),
+            custom_name: None,
+            members: vec![snapshot("a"), d],
+        });
+        let slots = vec![group.clone(), single("b"), single("c")];
+        let a = AgentId::new("claude", "a");
+        let b = AgentId::new("claude", "b");
+        let c = AgentId::new("claude", "c");
+
+        // Dragging the group after "b" lands it before "c".
+        assert_eq!(
+            live_reorder_destination(&slots, &group.ids(), Some(&b), true),
+            Some(Some(c.clone()))
+        );
+        // Dropping "c" onto the first half of the group puts it before the group.
+        assert_eq!(
+            live_reorder_destination(&slots, std::slice::from_ref(&c), Some(&a), false),
+            Some(Some(a.clone()))
+        );
+        assert_eq!(
+            live_reorder_destination(&slots, &group.ids(), Some(&b), false),
+            None
+        );
     }
 }
