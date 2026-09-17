@@ -18,7 +18,7 @@ There is no tray icon, analytics, conversation storage, or session history.
 
 This repository contains the v0.1 implementation:
 
-- extensible `AgentProvider` interface, multi-provider aggregation and an `AgentStore` that persists only hidden session IDs;
+- extensible `AgentProvider` interface, multi-provider aggregation and an `AgentStore` with persisted hidden session IDs and user-entered session/group names;
 - `.cstatus`-compatible Claude provider with PID validation and filesystem watching;
 - native Claude hook/status-line helper;
 - native Codex lifecycle hooks with context metrics and deep-link focusing;
@@ -28,6 +28,8 @@ This repository contains the v0.1 implementation:
 - macOS application bundling and Windows release staging.
 
 Linux is intentionally not packaged yet. Windows support targets native Claude Code with Git Bash; WSL-hosted sessions are not resolved to Windows windows in v0.1.
+
+Names entered through **Rename** are saved immediately in `custom-names.json` under the application data directory. They survive restarting AgentsMon and closing/reopening sessions or projects. Session names belong to a provider/session ID; group names belong to the working directory. Submit a blank name to remove its saved override. Provider-generated conversation titles are never written to this file. See [Custom name storage](docs/custom-names.md) for the schema, recovery and tests.
 
 ## Build
 

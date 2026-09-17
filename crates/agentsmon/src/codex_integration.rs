@@ -272,13 +272,13 @@ pub(crate) fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn replace_atomically(source: &Path, destination: &Path) -> Result<()> {
+pub(crate) fn replace_atomically(source: &Path, destination: &Path) -> Result<()> {
     fs::rename(source, destination)?;
     Ok(())
 }
 
 #[cfg(target_os = "windows")]
-fn replace_atomically(source: &Path, destination: &Path) -> Result<()> {
+pub(crate) fn replace_atomically(source: &Path, destination: &Path) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::Storage::FileSystem::{

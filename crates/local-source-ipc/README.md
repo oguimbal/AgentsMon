@@ -74,8 +74,10 @@ session cannot silently redirect a stale selection to another target.
 ## LeSwitcheur behaviour
 
 `switcheur-platform/src/local_sources.rs` registers source IDs and display names.
-Each panel starts fresh and polls registered sources off the UI thread once per
-second. Unavailability, malformed replies and incompatibility clear that source's
+Each panel starts fresh and polls each registered source independently off the UI
+thread once per second. Failed connections back off for 1, 2, 4, then 8 seconds
+(maximum); a successful reply resets the interval to one second. Closing the
+panel stops polling. Normal disconnects are silent and clear stale results. Unavailability, malformed replies and incompatibility clear that source's
 results; diagnostics are logged only when the error changes during an open
 panel. The original panel is closed after a focus acknowledgement; an activation
 error leaves a translated message if the panel is still open. A late response
@@ -103,7 +105,9 @@ colour. No provider-specific focus implementation is added to LeSwitcheur.
 Run `cargo test -p local-source-ipc` in either repository. This tests the v1
 fixture, version drift, additive fields, unknown states, malformed frames,
 size limits, real socket exchanges, duplicate servers, stale sockets and
-partial-frame deadlines. In LeSwitcheur, run
+partial-frame deadlines. Subprocess tests kill the source during a request,
+reconnect after a restart at the same socket path, and kill clients midway through
+a frame to verify that server workers are released. In LeSwitcheur, run
 `cargo test -p switcheur-core --test local_sources` for ranking, mixed-field
 queries, priorities, disconnection and selection preservation. AgentsMon's
 `local_source` tests cover metadata projection and focus dispatch/acknowledgement.

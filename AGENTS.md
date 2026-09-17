@@ -16,7 +16,7 @@ claude plugin validate .
 
 - `agentsmon-core` must remain pure Rust and provider/OS independent.
 - New agents implement `AgentProvider` (including `accent_rgb` for the card ring colour); do not add provider conditionals to `MonitorView`.
-- Session order and custom card/group names are deliberately in-memory only. Hidden session IDs (× button) persist in `hidden-sessions.json` under the data directory as IDs and timestamps only, so a restart does not bring closed sessions back; a hidden session still reappears on new activity.
+- Session order is in-memory only. Custom card/group names persist in `custom-names.json` under the data directory, keyed by provider/session ID and opaque group key; retain them when sessions disappear or a provider returns an empty snapshot. Only names explicitly typed in AgentsMon are saved, never provider titles or snapshots. Hidden session IDs (× button) persist separately in `hidden-sessions.json` as IDs and timestamps only, so a restart does not bring closed sessions back; a hidden session still reappears on new activity.
 - Never read or persist conversation content. Claude integration may consume hook metadata, metadata-only session registry status, status-line context metrics, transcript token counters (`usage` numbers only — never message text) and the session title lines Claude Code writes to the transcript (`ai-title` / `custom-title`). Codex integration may read the thread name from `~/.codex/session_index.jsonl`, never the `threads.title` column of Codex's SQLite state, which holds the first user message.
 - Grouping is resolved in `AgentStore::group_key` (today: working directory) and the UI only sees opaque `GroupKey`s; manual grouping later means a new variant and an assignment map, not UI changes.
 - Preserve an existing Claude `statusLine` exactly and restore it only if AgentsMon still owns the setting.
@@ -38,6 +38,7 @@ claude plugin validate .
 - One panel per physical display, bottom-left and always on top.
 - Screen hotplug and resolution changes reconcile panels without duplicates.
 - Dragging on one panel changes all panels; clicking the × never focuses the session.
+- Rename a session and a group, restart AgentsMon, and check both names. Close/reopen the project, then clear each name and restart again: the cleared names must not return. See `docs/custom-names.md` for storage and recovery.
 - Context values 0, 1, 50, 99, 100 and unavailable render correctly.
 - Claude states transition through idle, active, waiting and compacting.
 - Plugin installation is automatic and idempotent; uninstall preserves settings edited after installation.

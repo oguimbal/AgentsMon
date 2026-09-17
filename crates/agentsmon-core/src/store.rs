@@ -13,6 +13,26 @@ pub struct HiddenSession {
     pub hidden_at: SystemTime,
 }
 
+/// Only labels explicitly entered in AgentsMon, never provider titles or
+/// conversation content. Vectors keep structured keys portable in JSON.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustomNames {
+    pub sessions: Vec<SessionName>,
+    pub groups: Vec<GroupName>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionName {
+    pub id: AgentId,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupName {
+    pub key: GroupKey,
+    pub name: String,
+}
+
 #[derive(Debug, Default)]
 pub struct AgentStore {
     snapshots: HashMap<AgentId, AgentSnapshot>,
@@ -28,9 +48,8 @@ impl AgentStore {
         self.snapshots.retain(|id, _| live.contains(id));
         self.order.retain(|id| live.contains(id));
         self.hidden.retain(|id, _| live.contains(id));
-        self.names.retain(|id, _| live.contains(id));
-        let live_groups: HashSet<_> = incoming.iter().map(Self::group_key).collect();
-        self.group_names.retain(|key, _| live_groups.contains(key));
+        // Names are user preferences, not live-session state. Keep them across
+        // empty/partial provider snapshots and sessions resumed after a restart.
 
         for mut snapshot in incoming {
             snapshot.custom_name = self.names.get(&snapshot.id).cloned();
@@ -106,6 +125,51 @@ impl AgentStore {
         for session in sessions {
             self.hidden.entry(session.id).or_insert(session.hidden_at);
         }
+    }
+
+    /// Call before the first snapshot. A currently set name takes precedence.
+    pub fn restore_custom_names(&mut self, names: CustomNames) {
+        for session in names.sessions {
+            let name = session.name.trim();
+            if !name.is_empty() {
+                self.names.entry(session.id).or_insert_with(|| name.into());
+            }
+        }
+        for group in names.groups {
+            let name = group.name.trim();
+            if !name.is_empty() {
+                self.group_names
+                    .entry(group.key)
+                    .or_insert_with(|| name.into());
+            }
+        }
+    }
+
+    /// Stable ordering avoids writes caused only by HashMap iteration order.
+    pub fn custom_names(&self) -> CustomNames {
+        let mut sessions: Vec<_> = self
+            .names
+            .iter()
+            .map(|(id, name)| SessionName {
+                id: id.clone(),
+                name: name.clone(),
+            })
+            .collect();
+        sessions.sort_by(|a, b| {
+            (&a.id.provider, &a.id.session_id).cmp(&(&b.id.provider, &b.id.session_id))
+        });
+        let mut groups: Vec<_> = self
+            .group_names
+            .iter()
+            .map(|(key, name)| GroupName {
+                key: key.clone(),
+                name: name.clone(),
+            })
+            .collect();
+        groups.sort_by(|a, b| match (&a.key, &b.key) {
+            (GroupKey::Directory(a), GroupKey::Directory(b)) => a.cmp(b),
+        });
+        CustomNames { sessions, groups }
     }
 
     pub fn hide_group(&mut self, key: &GroupKey) {
@@ -238,6 +302,40 @@ mod tests {
         assert!(store.get(&a).unwrap().custom_name.is_none());
     }
 
+    #[test]
+    fn restored_names_survive_empty_snapshots_and_apply_to_the_correct_targets() {
+        let mut original = AgentStore::default();
+        let a = AgentId::new("claude", "a");
+        let group = GroupKey::Directory("/r/x".into());
+        original.apply_snapshot(vec![item_in("a", "/r/x"), item_in("b", "/r/x")]);
+        original.rename(&a, "Ma session");
+        original.rename_group(&group, "Mon projet");
+        let saved = original.custom_names();
+
+        let mut restarted = AgentStore::default();
+        restarted.restore_custom_names(saved.clone());
+        // No processes are available yet, or a provider temporarily failed.
+        restarted.apply_snapshot(vec![]);
+        assert_eq!(restarted.custom_names(), saved);
+        let mut other_provider = item_in("a", "/r/y");
+        other_provider.id.provider = "codex".into();
+        restarted.apply_snapshot(vec![
+            item_in("a", "/r/x"),
+            item_in("new", "/r/x"),
+            other_provider,
+        ]);
+        assert_eq!(restarted.get(&a).unwrap().label(), "Ma session");
+        assert_eq!(
+            restarted.get(&AgentId::new("codex", "a")).unwrap().label(),
+            "y"
+        );
+        assert_eq!(restarted.visible_slots()[0].label(), "Mon projet");
+
+        restarted.rename(&a, "  ");
+        restarted.rename_group(&group, "  ");
+        assert_eq!(restarted.custom_names(), CustomNames::default());
+    }
+
     fn item_in(id: &str, cwd: &str) -> AgentSnapshot {
         let mut snapshot = item(id);
         snapshot.cwd = PathBuf::from(cwd);
@@ -282,13 +380,13 @@ mod tests {
         store.hide_group(&x);
         assert!(store.visible().is_empty());
 
-        // A single leftover session is a plain card again, and the name is dropped
-        // once nothing runs in that directory.
+        // A single leftover session is a plain card again. The group preference
+        // remains when the project closes, and applies to its future sessions.
         store.apply_snapshot(vec![item_in("z", "/r/x")]);
         assert!(matches!(&store.visible_slots()[0], Slot::Single(_)));
         store.apply_snapshot(vec![]);
         store.apply_snapshot(vec![item_in("a", "/r/x"), item_in("c", "/r/x")]);
-        assert_eq!(store.visible_slots()[0].label(), "x");
+        assert_eq!(store.visible_slots()[0].label(), "Projet X");
     }
 
     #[test]

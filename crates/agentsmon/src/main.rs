@@ -39,6 +39,7 @@ const FALLBACK_POLL_INTERVAL: Duration = Duration::from_secs(3);
 const CHANGE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 mod connection_diagnostics;
+mod custom_names;
 mod hidden_sessions;
 mod local_source;
 mod notification;
@@ -87,6 +88,7 @@ struct AppStateInner {
     connection_window: RefCell<Option<AnyWindowHandle>>,
     /// Last hidden-session list written to disk, to skip redundant writes.
     persisted_hidden: RefCell<Vec<agentsmon_core::HiddenSession>>,
+    custom_names: RefCell<custom_names::Persistence>,
 }
 
 fn main() {
@@ -117,7 +119,9 @@ fn main() {
         } else {
             FALLBACK_POLL_INTERVAL
         };
-        let (store, persisted_hidden) = restored_store();
+        let (mut store, persisted_hidden) = restored_store();
+        let custom_names = custom_names::Persistence::new();
+        store.restore_custom_names(custom_names.restored());
         let state = AppState(Rc::new(AppStateInner {
             local_source: local_source::LocalSource::new(),
             store: RefCell::new(store),
@@ -134,6 +138,7 @@ fn main() {
             connection_diagnostics: RefCell::new(connection_diagnostics::ConnectionDiagnostics::new()),
             connection_window: RefCell::new(None),
             persisted_hidden: RefCell::new(persisted_hidden),
+            custom_names: RefCell::new(custom_names),
         }));
 
         cx.on_action(|_: &Quit, cx| cx.quit());
@@ -435,6 +440,11 @@ fn persist_hidden(state: &AppState) {
 fn broadcast(state: &AppState, cx: &mut App) {
     state.0.local_source.publish(state);
     persist_hidden(state);
+    state
+        .0
+        .custom_names
+        .borrow_mut()
+        .save_if_changed(state.0.store.borrow().custom_names());
     let slots = state.0.store.borrow().visible_slots();
     let providers = state.0.provider_statuses.borrow().clone();
     let unread = state.0.unread.borrow().clone();
