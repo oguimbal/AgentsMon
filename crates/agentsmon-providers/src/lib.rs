@@ -1,5 +1,8 @@
 mod claude;
+mod claude_runtime;
 mod codex;
+#[cfg(unix)]
+mod codex_ipc;
 mod focus;
 mod process;
 pub mod vibe;
@@ -12,6 +15,15 @@ use anyhow::Result;
 pub use claude::{CStatusRecord, ClaudeProvider, ProviderWatcher};
 pub use codex::{CodexApprovalsReviewer, CodexProvider, CodexStatusRecord};
 pub use vibe::{VibeProvider, VibeStatusRecord};
+
+/// Provider-owned, content-free diagnostic. `details` must never contain remote
+/// payloads, tool arguments/results, conversation text, or credentials.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderDiagnostic {
+    pub code: &'static str,
+    pub summary: &'static str,
+    pub details: String,
+}
 
 pub trait AgentProvider: Send + Sync {
     fn id(&self) -> &'static str;
@@ -31,4 +43,11 @@ pub trait AgentProvider: Send + Sync {
     fn focus(&self, target: &FocusTarget) -> Result<()>;
     fn watch(&self) -> Result<ProviderWatcher>;
     fn runtime_root(&self) -> &Path;
+    /// Worker updates are coalesced, just like filesystem watcher events.
+    fn take_changed(&self) -> bool {
+        false
+    }
+    fn diagnostic(&self) -> Option<ProviderDiagnostic> {
+        None
+    }
 }

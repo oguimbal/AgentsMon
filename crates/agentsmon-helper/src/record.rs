@@ -15,6 +15,9 @@ struct StatusRecord {
     state: String,
     activity: String,
     timestamp: String,
+    /// Last lifecycle hook, unaffected by status-line heartbeat writes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    event_timestamp: Option<String>,
     cwd: String,
     event: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -87,6 +90,7 @@ pub fn merge_record(path: &Path, update: RecordUpdate<'_>) -> Result<()> {
         .ok()
         .and_then(|bytes| serde_json::from_slice::<StatusRecord>(&bytes).ok());
     let environment = EnvironmentMetadata::current();
+    let now = Utc::now().to_rfc3339();
     let record = StatusRecord {
         session_id: update.session_id.into(),
         pid: if update.pid > 0 {
@@ -107,12 +111,21 @@ pub fn merge_record(path: &Path, update: RecordUpdate<'_>) -> Result<()> {
         } else {
             update.state.into()
         },
-        activity: if update.activity.is_empty() {
+        activity: if update.activity.is_empty() && update.event.is_empty() {
             previous.as_ref().map_or("", |r| r.activity.as_str()).into()
         } else {
             update.activity
         },
-        timestamp: Utc::now().to_rfc3339(),
+        timestamp: now.clone(),
+        event_timestamp: if update.event.is_empty() {
+            previous.as_ref().map(|r| {
+                r.event_timestamp
+                    .clone()
+                    .unwrap_or_else(|| r.timestamp.clone())
+            })
+        } else {
+            Some(now)
+        },
         cwd: if update.cwd.is_empty() {
             previous.as_ref().map_or("", |r| r.cwd.as_str()).into()
         } else {
@@ -419,6 +432,52 @@ mod tests {
         assert_eq!(
             path_from_transcript("/tmp/project/session.jsonl", "session").unwrap(),
             PathBuf::from("/tmp/project/session.agentsmon.cstatus")
+        );
+    }
+
+    #[test]
+    fn heartbeats_preserve_lifecycle_time_and_terminal_hooks_clear_activity() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.cstatus");
+        merge_record(&path, update(None)).unwrap();
+        let mut initial: StatusRecord = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        initial.timestamp = "2026-09-16T10:00:00Z".into();
+        initial.event_timestamp = None; // Upgrade an existing record too.
+        fs::write(&path, serde_json::to_vec(&initial).unwrap()).unwrap();
+        merge_record(
+            &path,
+            RecordUpdate {
+                state: "",
+                event: "",
+                activity: String::new(),
+                ..update(Some(20.0))
+            },
+        )
+        .unwrap();
+        let heartbeat: StatusRecord = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            heartbeat.event_timestamp.as_deref(),
+            Some("2026-09-16T10:00:00Z")
+        );
+        assert_eq!(heartbeat.state, "active");
+        assert_eq!(heartbeat.activity, "tool");
+        assert_ne!(heartbeat.timestamp, initial.timestamp);
+        merge_record(
+            &path,
+            RecordUpdate {
+                state: "idle",
+                event: "PostToolUseFailure",
+                activity: String::new(),
+                ..update(None)
+            },
+        )
+        .unwrap();
+        let stopped: StatusRecord = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(stopped.state, "idle");
+        assert!(stopped.activity.is_empty());
+        assert_eq!(
+            stopped.event_timestamp.as_deref(),
+            Some(stopped.timestamp.as_str())
         );
     }
 }

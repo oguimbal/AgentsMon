@@ -17,13 +17,23 @@ claude plugin validate .
 - `agentsmon-core` must remain pure Rust and provider/OS independent.
 - New agents implement `AgentProvider` (including `accent_rgb` for the card ring colour); do not add provider conditionals to `MonitorView`.
 - Session order and custom card/group names are deliberately in-memory only. Hidden session IDs (× button) persist in `hidden-sessions.json` under the data directory as IDs and timestamps only, so a restart does not bring closed sessions back; a hidden session still reappears on new activity.
-- Never read or persist conversation content. Claude integration may consume hook metadata, status-line context metrics, transcript token counters (`usage` numbers only — never message text) and the session title lines Claude Code writes to the transcript (`ai-title` / `custom-title`). Codex integration may read the thread name from `~/.codex/session_index.jsonl`, never the `threads.title` column of Codex's SQLite state, which holds the first user message.
+- Never read or persist conversation content. Claude integration may consume hook metadata, metadata-only session registry status, status-line context metrics, transcript token counters (`usage` numbers only — never message text) and the session title lines Claude Code writes to the transcript (`ai-title` / `custom-title`). Codex integration may read the thread name from `~/.codex/session_index.jsonl`, never the `threads.title` column of Codex's SQLite state, which holds the first user message.
 - Grouping is resolved in `AgentStore::group_key` (today: working directory) and the UI only sees opaque `GroupKey`s; manual grouping later means a new variant and an assignment map, not UI changes.
 - Preserve an existing Claude `statusLine` exactly and restore it only if AgentsMon still owns the setting.
 - UI state changes must be broadcast to every display panel.
 - Keep the no-tray product decision. The normal Dock/taskbar application presence is intentional.
 
+## Local source IPC
+
+- `crates/local-source-ipc` is vendored identically in LeSwitcheur and defines the versioned contract, socket transport and golden v1 fixture; see its README. Neither repository requires a sibling checkout to build.
+- `agentsmon/src/local_source.rs` publishes visible store metadata after every broadcast. Custom session/group names, states and unread notifications stay authoritative in AgentsMon. Never export conversation content or native focus targets.
+- The macOS/Unix socket exists only while AgentsMon runs. Unsupported versions, malformed requests, expired commands and unavailable sessions fail safely. Windows currently exposes no local source transport.
+- IPC focus, session-card focus and notification focus share `focus_agent_result`; clear unread state only after successful focus. Do not add a separate activation implementation for IPC consumers.
+
 ## Manual regression checks
+
+- Before changing the Codex desktop observer, read `docs/codex-desktop-ipc.md`. Keep incoming IPC decoding restricted to routing/status metadata; never log raw frames or Serde error messages containing input values. Preserve bounded background I/O, hook/lifecycle fallback and the persisted hourly diagnostic-notification limit.
+- Before changing Claude interruption handling, read `docs/claude-session-status.md`. Preserve explicit lifecycle timestamps, PID/session validation and fallback for older Claude processes. Silence or low CPU usage never establishes that a session is idle.
 
 - One panel per physical display, bottom-left and always on top.
 - Screen hotplug and resolution changes reconcile panels without duplicates.

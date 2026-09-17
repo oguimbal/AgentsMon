@@ -143,6 +143,8 @@ impl CodexStatusRecord {
 pub struct CodexProvider {
     root: PathBuf,
     archived_sessions_root: Option<PathBuf>,
+    #[cfg(unix)]
+    runtime: Option<crate::codex_ipc::Monitor>,
 }
 
 impl CodexProvider {
@@ -150,6 +152,14 @@ impl CodexProvider {
         Self {
             root: default_runtime_root(),
             archived_sessions_root: default_archived_sessions_root(),
+            #[cfg(unix)]
+            runtime: directories::UserDirs::new().map(|dirs| {
+                let home = std::env::var_os("CODEX_HOME")
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| dirs.home_dir().join(".codex"));
+                crate::codex_ipc::Monitor::start(home.join("ipc/ipc.sock"))
+            }),
         }
     }
 
@@ -157,6 +167,8 @@ impl CodexProvider {
         Self {
             root,
             archived_sessions_root: None,
+            #[cfg(unix)]
+            runtime: None,
         }
     }
 
@@ -165,6 +177,8 @@ impl CodexProvider {
         Self {
             root,
             archived_sessions_root: Some(archived_sessions_root),
+            #[cfg(unix)]
+            runtime: None,
         }
     }
 
@@ -285,6 +299,26 @@ impl AgentProvider for CodexProvider {
             });
         }
         snapshots.sort_by_key(|snapshot| snapshot.last_activity);
+        #[cfg(unix)]
+        if let Some(runtime) = &self.runtime {
+            runtime.update_targets(
+                snapshots
+                    .iter()
+                    .rev()
+                    .filter(|s| s.state != AgentState::Idle)
+                    .map(|s| crate::codex_ipc::Target {
+                        id: s.id.session_id.clone(),
+                        hook_activity: s.last_activity,
+                    })
+                    .collect(),
+            );
+            for snapshot in &mut snapshots {
+                snapshot.state = runtime_state(
+                    snapshot.state,
+                    runtime.state(&snapshot.id.session_id, snapshot.last_activity),
+                );
+            }
+        }
         Ok(snapshots)
     }
 
@@ -329,6 +363,34 @@ impl AgentProvider for CodexProvider {
 
     fn runtime_root(&self) -> &Path {
         &self.root
+    }
+
+    fn take_changed(&self) -> bool {
+        #[cfg(unix)]
+        if let Some(runtime) = &self.runtime {
+            return runtime.take_changed();
+        }
+        false
+    }
+
+    fn diagnostic(&self) -> Option<crate::ProviderDiagnostic> {
+        #[cfg(unix)]
+        if let Some(runtime) = &self.runtime {
+            return runtime.diagnostic();
+        }
+        None
+    }
+}
+
+/// Explicit lifecycle completion wins over an earlier sampled status. The
+/// runtime does not distinguish compaction from ordinary active work.
+#[cfg(any(unix, test))]
+fn runtime_state(fallback: AgentState, runtime: Option<AgentState>) -> AgentState {
+    match (fallback, runtime) {
+        (AgentState::Idle, _) => AgentState::Idle,
+        (AgentState::Compacting, Some(AgentState::Active)) => AgentState::Compacting,
+        (_, Some(state)) => state,
+        (_, None) => fallback,
     }
 }
 
@@ -566,6 +628,31 @@ mod tests {
         ).unwrap();
         record.transcript_path = path;
         record
+    }
+
+    #[test]
+    fn explicit_runtime_waits_override_active_hooks_but_not_completion() {
+        assert_eq!(
+            runtime_state(AgentState::Active, Some(AgentState::Waiting)),
+            AgentState::Waiting
+        );
+        assert_eq!(
+            runtime_state(AgentState::Waiting, Some(AgentState::Active)),
+            AgentState::Active
+        );
+        assert_eq!(
+            runtime_state(AgentState::Active, Some(AgentState::Idle)),
+            AgentState::Idle
+        );
+        assert_eq!(
+            runtime_state(AgentState::Compacting, Some(AgentState::Active)),
+            AgentState::Compacting
+        );
+        assert_eq!(
+            runtime_state(AgentState::Idle, Some(AgentState::Waiting)),
+            AgentState::Idle
+        );
+        assert_eq!(runtime_state(AgentState::Active, None), AgentState::Active);
     }
 
     fn lifecycle(kind: &str, timestamp: &str) -> String {

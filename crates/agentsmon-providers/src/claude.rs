@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use sysinfo::{Pid, System};
 
 use crate::process::{find_host, refresh_process_trees};
-use crate::{focus, AgentProvider};
+use crate::{claude_runtime, focus, AgentProvider, ProviderDiagnostic};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CStatusRecord {
@@ -34,6 +34,8 @@ pub struct CStatusRecord {
     #[serde(default)]
     pub activity: String,
     pub timestamp: String,
+    #[serde(default)]
+    pub event_timestamp: Option<String>,
     #[serde(default)]
     pub cwd: String,
     #[serde(default)]
@@ -117,19 +119,18 @@ impl ProviderWatcher {
 
 pub struct ClaudeProvider {
     root: PathBuf,
+    runtime: claude_runtime::Registry,
     usage_cache: Arc<Mutex<UsageCache>>,
 }
 
 impl ClaudeProvider {
     pub fn new() -> Self {
-        Self {
-            root: default_projects_root(),
-            usage_cache: Arc::default(),
-        }
+        Self::with_root(default_projects_root())
     }
 
     pub fn with_root(root: PathBuf) -> Self {
         Self {
+            runtime: claude_runtime::Registry::new(root.with_file_name("sessions")),
             root,
             usage_cache: Arc::default(),
         }
@@ -190,7 +191,7 @@ impl AgentProvider for ClaudeProvider {
     }
 
     fn discover(&self) -> Result<Vec<AgentSnapshot>> {
-        let records = prefer_agentsmon_records(
+        let mut records = prefer_agentsmon_records(
             self.scan_files()?
                 .into_iter()
                 .filter_map(|file| match Self::parse_file(&file) {
@@ -205,6 +206,9 @@ impl AgentProvider for ClaudeProvider {
                 })
                 .collect(),
         );
+        // Stable order also makes a persistent diagnostic stable when several
+        // sessions are affected. The application limits notifications globally.
+        records.sort_by(|a, b| a.0.session_id.cmp(&b.0.session_id));
         let mut system = System::new();
         let seed_pids: Vec<_> = records
             .iter()
@@ -213,14 +217,44 @@ impl AgentProvider for ClaudeProvider {
             .collect();
         refresh_process_trees(&mut system, &seed_pids);
         let mut snapshots = Vec::new();
-        for (record, last_activity) in records {
+        let mut runtime_issue = None;
+        for (record, mut last_activity) in records {
             if !is_claude_process(&system, record.pid, last_activity) {
                 continue;
             }
             let cwd = PathBuf::from(&record.cwd);
             let (host_pid, detected_host_app) =
                 find_host(&system, record.pid, record.ppid, record.focused_app_pid);
-            let state = record.state();
+            let mut state = record.state();
+            let hook_time = record
+                .event_timestamp
+                .as_deref()
+                .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+                .map(SystemTime::from)
+                .unwrap_or(last_activity);
+            let process_started = system
+                .process(Pid::from_u32(record.pid as u32))
+                .and_then(|p| {
+                    SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(p.start_time()))
+                })
+                .unwrap_or(last_activity);
+            match self.runtime.read(
+                record.pid,
+                &record.session_id,
+                process_started,
+                state,
+                hook_time,
+                SystemTime::now(),
+            ) {
+                Ok(Some((runtime_state, timestamp))) => {
+                    state = runtime_state;
+                    last_activity = last_activity.max(timestamp);
+                }
+                Ok(None) => {}
+                Err(issue) => {
+                    runtime_issue.get_or_insert(issue);
+                }
+            }
             let uri = focus_uri(
                 record.host_app.as_deref(),
                 detected_host_app.as_deref(),
@@ -251,6 +285,7 @@ impl AgentProvider for ClaudeProvider {
                 last_activity,
             });
         }
+        self.runtime.finish_scan(runtime_issue);
         snapshots.sort_by_key(|snapshot| snapshot.last_activity);
         Ok(snapshots)
     }
@@ -312,11 +347,22 @@ impl AgentProvider for ClaudeProvider {
                 }
             })?;
         watcher.watch(&self.root, RecursiveMode::Recursive)?;
+        // Registry may not exist on older Claude installations. The regular
+        // ten-second refresh still covers its later creation or a lost watch.
+        if self.runtime.root.is_dir() {
+            if let Err(error) = watcher.watch(&self.runtime.root, RecursiveMode::NonRecursive) {
+                tracing::warn!(%error, "Claude session registry watcher unavailable; polling remains enabled");
+            }
+        }
         Ok(ProviderWatcher::new(watcher, changes))
     }
 
     fn runtime_root(&self) -> &Path {
         &self.root
+    }
+
+    fn diagnostic(&self) -> Option<ProviderDiagnostic> {
+        self.runtime.diagnostic()
     }
 }
 

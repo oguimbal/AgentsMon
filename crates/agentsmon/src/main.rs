@@ -20,7 +20,10 @@ use gpui::{
 };
 use gpui_platform::application;
 
-actions!(agentsmon, [Quit, ShowBars, Diagnostics]);
+actions!(
+    agentsmon,
+    [Quit, ShowBars, Diagnostics, ConnectionDiagnostics]
+);
 
 const BAR_HEIGHT: f32 = 23.0;
 const SCREEN_INSET: f32 = 0.0;
@@ -35,7 +38,9 @@ const WATCHED_POLL_INTERVAL: Duration = Duration::from_secs(10);
 const FALLBACK_POLL_INTERVAL: Duration = Duration::from_secs(3);
 const CHANGE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
+mod connection_diagnostics;
 mod hidden_sessions;
+mod local_source;
 mod notification;
 
 struct Panel {
@@ -66,6 +71,7 @@ struct GroupMenu {
 }
 
 struct AppStateInner {
+    local_source: local_source::LocalSource,
     store: RefCell<AgentStore>,
     provider_statuses: RefCell<Vec<ProviderStatus>>,
     providers: Vec<Arc<dyn AgentProvider>>,
@@ -77,6 +83,8 @@ struct AppStateInner {
     group_menu: RefCell<Option<GroupMenu>>,
     unread: RefCell<HashSet<agentsmon_core::AgentId>>,
     notifications: notification::NativeNotifications,
+    connection_diagnostics: RefCell<connection_diagnostics::ConnectionDiagnostics>,
+    connection_window: RefCell<Option<AnyWindowHandle>>,
     /// Last hidden-session list written to disk, to skip redundant writes.
     persisted_hidden: RefCell<Vec<agentsmon_core::HiddenSession>>,
 }
@@ -111,6 +119,7 @@ fn main() {
         };
         let (store, persisted_hidden) = restored_store();
         let state = AppState(Rc::new(AppStateInner {
+            local_source: local_source::LocalSource::new(),
             store: RefCell::new(store),
             provider_statuses: RefCell::new(Vec::new()),
             providers,
@@ -122,6 +131,8 @@ fn main() {
             group_menu: RefCell::new(None),
             unread: RefCell::new(HashSet::new()),
             notifications: notification::NativeNotifications::new(),
+            connection_diagnostics: RefCell::new(connection_diagnostics::ConnectionDiagnostics::new()),
+            connection_window: RefCell::new(None),
             persisted_hidden: RefCell::new(persisted_hidden),
         }));
 
@@ -131,9 +142,15 @@ fn main() {
         cx.on_action(move |_: &ShowBars, cx| reconcile_displays(cx, &show_state, true));
         let diagnostics_state = state.clone();
         cx.on_action(move |_: &Diagnostics, cx| open_diagnostics(cx, &diagnostics_state));
+        let connection_state = state.clone();
+        cx.on_action(move |_: &ConnectionDiagnostics, cx| {
+            let report = connection_state.0.connection_diagnostics.borrow().current_prompt();
+            open_connection_report(cx, &connection_state, "Diagnostic des connexions".into(), report);
+        });
         cx.set_menus([Menu::new("AgentsMon").items([
             MenuItem::action("Afficher les barres", ShowBars),
             MenuItem::action("Diagnostic Claude…", Diagnostics),
+            MenuItem::action("Diagnostic des connexions…", ConnectionDiagnostics),
             MenuItem::separator(),
             MenuItem::action("Quitter AgentsMon", Quit),
         ])]);
@@ -254,6 +271,17 @@ fn refresh(state: &AppState, cx: &mut App) {
                 tracing::warn!(provider = provider.id(), %error, "agent discovery failed")
             }
         }
+        let prompt = state.0.connection_diagnostics.borrow_mut().observe(
+            provider.id(),
+            provider.display_name(),
+            provider.diagnostic(),
+        );
+        if let Some(prompt) = prompt {
+            state
+                .0
+                .notifications
+                .show_diagnostic(provider.display_name(), prompt);
+        }
     }
     snapshots.sort_by_key(|snapshot| snapshot.last_activity);
     let previous: HashMap<_, _> = state
@@ -298,8 +326,19 @@ fn spawn_refresh_loop(cx: &mut App, state: AppState, poll_interval: Duration) {
     let mut last_refresh = Instant::now();
     let mut refresh_pending = false;
     cx.spawn(async move |cx: &mut AsyncApp| loop {
-        while let Some(id) = state.0.notifications.try_clicked() {
-            cx.update(|cx| focus_agent(&id, &state, cx));
+        while let Ok(command) = state.0.local_source.commands.try_recv() {
+            if Instant::now() < command.deadline {
+                let result = cx.update(|cx| focus_agent_result(&command.id, &state, cx));
+                let _ = command.reply.try_send(result);
+            }
+        }
+        while let Some(click) = state.0.notifications.try_clicked() {
+            cx.update(|cx| match click {
+                notification::NotificationClick::Agent(id) => focus_agent(&id, &state, cx),
+                notification::NotificationClick::Diagnostic { title, prompt } => {
+                    open_connection_report(cx, &state, title, prompt)
+                }
+            });
         }
         let should_close_details = state.0.details_window.borrow().is_some()
             && !pointer_is_over_native_panel()
@@ -338,6 +377,15 @@ fn spawn_refresh_loop(cx: &mut App, state: AppState, poll_interval: Duration) {
             .count()
             > 0;
         refresh_pending |= changed;
+        // Drain every provider's worker signal, even if a filesystem event has
+        // already requested a refresh. No provider-specific UI conditionals.
+        refresh_pending |= state
+            .0
+            .providers
+            .iter()
+            .filter(|provider| provider.take_changed())
+            .count()
+            > 0;
         let elapsed = last_refresh.elapsed();
         let periodic_refresh_due = elapsed >= poll_interval;
         let changed_refresh_due = refresh_pending && elapsed >= CHANGE_REFRESH_INTERVAL;
@@ -385,6 +433,7 @@ fn persist_hidden(state: &AppState) {
 }
 
 fn broadcast(state: &AppState, cx: &mut App) {
+    state.0.local_source.publish(state);
     persist_hidden(state);
     let slots = state.0.store.borrow().visible_slots();
     let providers = state.0.provider_statuses.borrow().clone();
@@ -784,29 +833,39 @@ fn provider_display_name(state: &AppState, provider_id: &str) -> String {
 }
 
 fn focus_agent(id: &agentsmon_core::AgentId, state: &AppState, cx: &mut App) {
-    state.0.unread.borrow_mut().remove(id);
-    state.0.notifications.close(id);
+    if let Err(code) = focus_agent_result(id, state, cx) {
+        tracing::warn!(code, session = %id.session_id, "focus failed");
+    }
+}
+
+fn focus_agent_result(
+    id: &agentsmon_core::AgentId,
+    state: &AppState,
+    cx: &mut App,
+) -> Result<(), &'static str> {
     let target = state
         .0
         .store
         .borrow()
-        .get(id)
-        .map(|snapshot| snapshot.focus_target.clone());
-    if let Some(target) = target {
-        if let Some(provider) = state
-            .0
-            .providers
-            .iter()
-            .find(|provider| provider.id() == id.provider)
-        {
-            if let Err(error) = provider.focus(&target) {
-                tracing::warn!(%error, session = %id.session_id, provider = %id.provider, "focus failed");
-            }
-        } else {
-            tracing::warn!(provider = %id.provider, "focus provider is unavailable");
-        }
-    }
+        .visible()
+        .into_iter()
+        .find(|snapshot| &snapshot.id == id)
+        .map(|snapshot| snapshot.focus_target)
+        .ok_or("stale_session")?;
+    let provider = state
+        .0
+        .providers
+        .iter()
+        .find(|provider| provider.id() == id.provider)
+        .ok_or("provider_unavailable")?;
+    provider.focus(&target).map_err(|error| {
+        tracing::warn!(%error, session = %id.session_id, provider = %id.provider, "focus failed");
+        "focus_failed"
+    })?;
+    state.0.unread.borrow_mut().remove(id);
+    state.0.notifications.close(id);
     broadcast(state, cx);
+    Ok(())
 }
 
 fn close_details(state: &AppState, cx: &mut App) {
@@ -1046,6 +1105,40 @@ fn reconcile_displays(cx: &mut App, state: &AppState, force: bool) {
         }
     }
     configure_native_panels(*state.0.x_offset.borrow());
+}
+
+fn open_connection_report(cx: &mut App, state: &AppState, title: String, report: String) {
+    if let Some(handle) = state.0.connection_window.borrow_mut().take() {
+        let _ = cx.update_window(handle, |_, window, _| window.remove_window());
+    }
+    let options = WindowOptions {
+        titlebar: Some(gpui::TitlebarOptions {
+            title: Some(title.clone().into()),
+            appears_transparent: false,
+            traffic_light_position: None,
+        }),
+        window_bounds: Some(WindowBounds::Windowed(Bounds {
+            origin: point(px(100.0), px(100.0)),
+            size: size(px(760.0), px(580.0)),
+        })),
+        kind: WindowKind::Normal,
+        focus: true,
+        show: true,
+        is_movable: true,
+        is_resizable: true,
+        ..Default::default()
+    };
+    match cx.open_window(options, move |_, cx| {
+        cx.new(|_| agentsmon_ui::DiagnosticReportView::new(title, report))
+    }) {
+        Ok(handle) => {
+            *state.0.connection_window.borrow_mut() = Some(handle.into());
+            cx.activate(true);
+        }
+        Err(error) => {
+            tracing::warn!(%error, "cannot open connection diagnostic report; see persistent diagnostic log")
+        }
+    }
 }
 
 fn open_diagnostics(cx: &mut App, state: &AppState) {

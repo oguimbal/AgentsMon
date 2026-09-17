@@ -37,14 +37,17 @@ dependencies = [
  "agentsmon-providers",
  "agentsmon-ui",
  "anyhow",
+ "chrono",
  "crossbeam-channel",
  "directories",
  "gpui",
  "gpui_platform",
+ "local-source-ipc",
  "mac-usernotifications",
  "notify-rust",
  "objc2",
  "objc2-app-kit",
+ "serde",
  "serde_json",
  "tempfile",
  "toml_edit 0.22.27",
@@ -87,6 +90,7 @@ dependencies = [
  "chrono",
  "crossbeam-channel",
  "directories",
+ "libc",
  "notify",
  "objc2",
  "objc2-app-kit",
@@ -3098,6 +3102,16 @@ name = "litrs"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
+
+[[package]]
+name = "local-source-ipc"
+version = "1.0.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
 
 [[package]]
 name = "lock_api"

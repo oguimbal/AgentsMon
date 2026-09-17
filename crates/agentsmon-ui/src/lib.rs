@@ -1,6 +1,8 @@
 //! GPUI views for AgentsMon.
 
+mod diagnostic_report;
 mod text_input;
+pub use diagnostic_report::DiagnosticReportView;
 
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::PI;

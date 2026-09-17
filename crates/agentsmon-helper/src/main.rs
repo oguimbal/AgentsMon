@@ -22,6 +22,10 @@ struct HookInput {
     #[serde(default)]
     notification_type: Option<String>,
     #[serde(default)]
+    is_interrupt: bool,
+    #[serde(default)]
+    agent_id: Option<String>,
+    #[serde(default)]
     background_tasks: Vec<serde_json::Value>,
 }
 
@@ -100,6 +104,12 @@ fn event_state(input: &HookInput) -> (&'static str, String) {
                 .unwrap_or_else(|| "notification".into()),
         ),
         "PreCompact" => ("compacting", "compacting".into()),
+        // Stop is explicitly NOT emitted for user interrupts. An interrupted
+        // tool is a terminal event, unlike an ordinary tool failure. An agent
+        // interruption alone does not establish that the parent turn ended.
+        "PostToolUseFailure" if input.is_interrupt && input.agent_id.is_none() => {
+            ("idle", String::new())
+        }
         "Stop" if input.background_tasks.is_empty() => ("idle", String::new()),
         "Stop" => ("active", "background task".into()),
         "PostCompact" | "UserPromptSubmit" | "PreToolUse" | "PostToolUse"
@@ -122,6 +132,8 @@ mod tests {
             hook_event_name: event.into(),
             tool_name: None,
             notification_type: None,
+            is_interrupt: false,
+            agent_id: None,
             background_tasks: vec![],
         }
     }
@@ -144,5 +156,19 @@ mod tests {
 
         input.hook_event_name = "PostToolUse".into();
         assert_eq!(event_state(&input), ("active", "ExitPlanMode".into()));
+    }
+
+    #[test]
+    fn interrupted_tool_ends_the_turn_but_an_ordinary_failure_does_not() {
+        let mut input: HookInput = serde_json::from_str(
+            r#"{"session_id":"s","transcript_path":"/tmp/s.jsonl","hook_event_name":"PostToolUseFailure","tool_name":"Bash","is_interrupt":true,"error":"ignored","tool_input":{"command":"ignored"}}"#,
+        ).unwrap();
+        assert_eq!(event_state(&input), ("idle", String::new()));
+        input.agent_id = Some("child".into());
+        assert_eq!(event_state(&input).0, "active");
+        input.agent_id = None;
+        input.is_interrupt = false;
+        assert_eq!(event_state(&input).0, "active");
+        assert_eq!(event_state(&hook("PostToolUseFailure")).0, "active");
     }
 }

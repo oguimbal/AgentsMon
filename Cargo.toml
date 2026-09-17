@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/local-source-ipc",
     "crates/agentsmon",
     "crates/agentsmon-core",
     "crates/agentsmon-providers",
