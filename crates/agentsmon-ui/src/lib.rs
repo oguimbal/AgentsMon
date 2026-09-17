@@ -222,14 +222,20 @@ impl MonitorView {
         let id = agent.id.clone();
         let focus_id = id.clone();
         let hide_id = id.clone();
-        let label = agent.label().to_owned();
+        let in_menu = self.layout == Layout::Menu;
+        // The menu lists sessions that share a project name, so it shows the
+        // conversation title instead (see `AgentSnapshot::menu_label`).
+        let label = if in_menu {
+            agent.menu_label().to_owned()
+        } else {
+            agent.label().to_owned()
+        };
         let context = agent.context_usage.map(|usage| usage.used_percentage());
         let accent = self.accent_for(&id.provider);
         let hover_details = agent.clone();
         let rename_target = RenameTarget::Session(Box::new(agent.clone()));
         let is_unread = self.unread.contains(&id);
         let state_background = state_color(agent.state);
-        let in_menu = self.layout == Layout::Menu;
 
         let card = div()
             .id(SharedString::from(format!(
@@ -279,7 +285,7 @@ impl MonitorView {
                     .size(px(CONTEXT_INDICATOR_SIZE))
                     .child(context_pie(context, accent)),
             )
-            .child(card_label(label))
+            .child(card_label(label, in_menu))
             .child(close_button(
                 format!("hide-{}", hide_id.session_id),
                 cx.listener(move |_, _, _, cx| {
@@ -365,7 +371,7 @@ impl MonitorView {
                     .size(px(CONTEXT_INDICATOR_SIZE))
                     .child(group_indicator(group.members.len(), accents)),
             )
-            .child(card_label(label))
+            .child(card_label(label, false))
             .child(close_button(
                 format!("hide-{element_id}"),
                 cx.listener(move |_, _, _, cx| {
@@ -510,9 +516,16 @@ fn unread_badge() -> impl IntoElement {
         .bg(rgb(0xf2b84b))
 }
 
-fn card_label(label: String) -> impl IntoElement {
+/// Card text. In the menu the label stretches over the row so the close
+/// button of every member lines up on the right edge.
+fn card_label(label: String, in_menu: bool) -> impl IntoElement {
     div()
-        .max_w(px(122.0))
+        .max_w(px(if in_menu {
+            MENU_LABEL_MAX_WIDTH
+        } else {
+            BAR_LABEL_MAX_WIDTH
+        }))
+        .when(in_menu, |label| label.flex_1())
         .overflow_hidden()
         .text_ellipsis()
         .text_size(px(10.0))
@@ -1399,16 +1412,24 @@ pub fn natural_width(slots: &[Slot], providers: &[ProviderStatus], max_width: f3
     content.clamp(76.0, max_width.max(76.0))
 }
 
+const BAR_LABEL_MAX_WIDTH: f32 = 122.0;
+const MENU_LABEL_MAX_WIDTH: f32 = 240.0;
+
 /// Estimated width of one card for the given label.
 fn card_width(label: &str) -> f32 {
-    44.0 + label.chars().count().min(27) as f32 * 5.5
+    estimated_card_width(label, BAR_LABEL_MAX_WIDTH)
+}
+
+fn estimated_card_width(label: &str, label_max_width: f32) -> f32 {
+    let text = (label.chars().count() as f32 * 5.5).min(label_max_width);
+    44.0 + text
 }
 
 /// Size of the menu window listing a group's members as vertical cards.
 pub fn menu_size(members: &[AgentSnapshot]) -> (f32, f32) {
     let widest = members
         .iter()
-        .map(|member| card_width(member.label()))
+        .map(|member| estimated_card_width(member.menu_label(), MENU_LABEL_MAX_WIDTH))
         .fold(0.0, f32::max);
     let width = 6.0 + widest + 4.0;
     let height = 6.0 + members.len() as f32 * 17.0 + members.len().saturating_sub(1) as f32 * 3.0;
@@ -1701,6 +1722,24 @@ mod tests {
             menu_size(&[snapshot("a"), long, snapshot("c")]).1,
             6.0 + 3.0 * 17.0 + 6.0
         );
+    }
+
+    #[test]
+    fn menu_is_sized_on_conversation_titles() {
+        // The menu shows the agent's title while the bar keeps the project
+        // name, so only the menu grows with a long title.
+        let mut titled = snapshot("a");
+        let plain_menu = menu_size(&[titled.clone()]).0;
+        let plain_bar = natural_width(&[Slot::Single(Box::new(titled.clone()))], &[], 900.0);
+        titled.title = Some("Investigate the flaky integration test suite".into());
+        assert!(menu_size(&[titled.clone()]).0 > plain_menu);
+        assert_eq!(
+            natural_width(&[Slot::Single(Box::new(titled.clone()))], &[], 900.0),
+            plain_bar
+        );
+        // A custom name still wins over the title everywhere.
+        titled.custom_name = Some("x".into());
+        assert_eq!(menu_size(&[titled]).0, menu_size(&[snapshot("x")]).0);
     }
 
     #[test]

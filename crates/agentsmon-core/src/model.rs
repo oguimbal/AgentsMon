@@ -165,6 +165,24 @@ impl AgentSnapshot {
             .unwrap_or(&self.project_name)
     }
 
+    /// Text shown on the session card inside a group menu: the user's custom
+    /// name, else the conversation title, else the project name.
+    ///
+    /// The bar keeps the project name because agent-chosen titles are usually
+    /// long and several of them side by side would eat the screen width when
+    /// many sessions run. A vertical menu has room, and the members of a group
+    /// all share the same project name, so the title is what tells them apart.
+    pub fn menu_label(&self) -> &str {
+        self.custom_name
+            .as_deref()
+            .filter(|name| !name.trim().is_empty())
+            .or(self
+                .title
+                .as_deref()
+                .filter(|title| !title.trim().is_empty()))
+            .unwrap_or(&self.project_name)
+    }
+
     pub fn project_name(cwd: &Path) -> String {
         cwd.file_name()
             .and_then(|name| name.to_str())
