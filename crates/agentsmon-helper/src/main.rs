@@ -26,7 +26,27 @@ struct HookInput {
     #[serde(default)]
     agent_id: Option<String>,
     #[serde(default)]
-    background_tasks: Vec<serde_json::Value>,
+    background_tasks: Vec<BackgroundTask>,
+}
+
+/// One running background task listed by the Stop hook. Only its public type
+/// is decoded: `command` and `description` carry conversation text.
+#[derive(Debug, Deserialize)]
+struct BackgroundTask {
+    #[serde(rename = "type", default)]
+    kind: String,
+}
+
+impl BackgroundTask {
+    /// Agent work that continues after the turn and resumes the session.
+    /// Shells (dev servers…), monitors, MCP tasks and internal housekeeping
+    /// (`dream`, `auto-mode scan`) run without the model waiting on them.
+    fn is_agent_work(&self) -> bool {
+        matches!(
+            self.kind.as_str(),
+            "subagent" | "workflow" | "teammate" | "cloud session"
+        )
+    }
 }
 
 fn main() {
@@ -114,8 +134,15 @@ fn event_state(input: &HookInput) -> (&'static str, String) {
         "PostToolUseFailure" if input.is_interrupt && input.agent_id.is_none() => {
             ("idle", String::new())
         }
-        "Stop" if input.background_tasks.is_empty() => ("idle", String::new()),
-        "Stop" => ("active", "background task".into()),
+        "Stop"
+            if input
+                .background_tasks
+                .iter()
+                .any(BackgroundTask::is_agent_work) =>
+        {
+            ("active", "background task".into())
+        }
+        "Stop" => ("idle", String::new()),
         "PostCompact" | "UserPromptSubmit" | "PreToolUse" | "PostToolUse"
         | "PostToolUseFailure" | "SubagentStart" | "SubagentStop" => {
             ("active", input.tool_name.clone().unwrap_or_default())
@@ -150,6 +177,32 @@ mod tests {
         assert_eq!(event_state(&hook("PreCompact")).0, "compacting");
         assert_eq!(event_state(&hook("PostCompact")).0, "active");
         assert_eq!(event_state(&hook("Stop")).0, "idle");
+    }
+
+    #[test]
+    fn background_shells_do_not_keep_a_finished_turn_active() {
+        let stop = |tasks: &str| {
+            let input: HookInput = serde_json::from_str(&format!(
+                r#"{{"session_id":"s","transcript_path":"/tmp/s.jsonl","hook_event_name":"Stop","background_tasks":{tasks}}}"#
+            ))
+            .unwrap();
+            event_state(&input).0
+        };
+        assert_eq!(
+            stop(
+                r#"[{"id":"b1","type":"shell","status":"running","command":"npm run dev","description":"dev server"}]"#
+            ),
+            "idle"
+        );
+        assert_eq!(
+            stop(r#"[{"id":"m1","type":"monitor"},{"id":"d1","type":"dream"}]"#),
+            "idle"
+        );
+        assert_eq!(
+            stop(r#"[{"id":"b1","type":"shell"},{"id":"a1","type":"subagent","agent_type":"x"}]"#),
+            "active"
+        );
+        assert_eq!(stop(r#"[{"id":"x"}]"#), "idle");
     }
 
     #[test]

@@ -33,6 +33,16 @@ pub(crate) struct Registry {
     health: Mutex<Health>,
 }
 
+/// The session's latest Claude hook, as recorded by the helper.
+#[derive(Debug, Clone, Copy)]
+pub struct LastHook {
+    pub state: AgentState,
+    pub time: SystemTime,
+    /// SubagentStart/SubagentStop: may come from a background or internal
+    /// forked agent after the main turn ended.
+    pub subagent: bool,
+}
+
 #[derive(Default)]
 struct Health {
     pending: Option<(ProviderDiagnostic, Instant)>,
@@ -54,8 +64,7 @@ impl Registry {
         pid: i32,
         session_id: &str,
         process_started: SystemTime,
-        hook_state: AgentState,
-        hook_time: SystemTime,
+        hook: LastHook,
         now: SystemTime,
     ) -> Result<Option<(AgentState, SystemTime)>, ProviderDiagnostic> {
         let path = self.root.join(format!("{pid}.json"));
@@ -137,7 +146,7 @@ impl Registry {
         }
         let (Some(status), Some(timestamp)) = (record.status.as_deref(), record.status_updated_at)
         else {
-            if hook_state == AgentState::Idle {
+            if hook.state == AgentState::Idle {
                 return Ok(None);
             }
             let mut diagnostic = issue("claude.registry.status_unavailable", "Cette session Claude ne publie pas son état courant. Relancez-la avec une version récente de Claude Code.");
@@ -154,8 +163,10 @@ impl Registry {
             return Err(diagnostic);
         };
         let state = match status {
-            "idle" => AgentState::Idle,
-            "busy" | "shell" => AgentState::Active,
+            // `shell`: the turn is over but a background `local_bash` task
+            // (e.g. a dev server) still runs. The model is not working on it.
+            "idle" | "shell" => AgentState::Idle,
+            "busy" => AgentState::Active,
             "waiting" => AgentState::Waiting,
             _ => {
                 return Err(issue(
@@ -171,10 +182,14 @@ impl Registry {
                 "Les horodatages du statut Claude sont incohérents.",
             ));
         }
-        if timestamp <= hook_time {
-            return Ok(None); // A new prompt/hook beats an old registry idle.
+        // A new prompt/hook beats an old registry idle, except a subagent
+        // lifecycle hook: once the main turn published idle, a later
+        // SubagentStart/SubagentStop comes from a background or internal
+        // forked agent, and a resumed main turn republishes busy anyway.
+        if timestamp <= hook.time && !(hook.subagent && state == AgentState::Idle) {
+            return Ok(None);
         }
-        let state = if state == AgentState::Active && hook_state == AgentState::Compacting {
+        let state = if state == AgentState::Active && hook.state == AgentState::Compacting {
             AgentState::Compacting
         } else {
             state

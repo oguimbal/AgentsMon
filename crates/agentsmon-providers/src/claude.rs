@@ -242,8 +242,11 @@ impl AgentProvider for ClaudeProvider {
                 record.pid,
                 &record.session_id,
                 process_started,
-                state,
-                hook_time,
+                claude_runtime::LastHook {
+                    state,
+                    time: hook_time,
+                    subagent: matches!(record.event.as_str(), "SubagentStart" | "SubagentStop"),
+                },
                 SystemTime::now(),
             ) {
                 Ok(Some((runtime_state, timestamp))) => {

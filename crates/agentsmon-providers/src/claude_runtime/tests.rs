@@ -17,8 +17,11 @@ fn read(
         PID,
         "s",
         millis(9000).unwrap(),
-        state,
-        millis(hook_ms).unwrap(),
+        LastHook {
+            state,
+            time: millis(hook_ms).unwrap(),
+            subagent: false,
+        },
         millis(30000).unwrap(),
     )
 }
@@ -61,7 +64,9 @@ fn explicit_wait_compaction_and_shell_states() {
         ("idle", AgentState::Waiting, AgentState::Idle),
         ("busy", AgentState::Compacting, AgentState::Compacting),
         ("idle", AgentState::Compacting, AgentState::Idle),
-        ("shell", AgentState::Idle, AgentState::Active),
+        ("shell", AgentState::Active, AgentState::Idle),
+        // Last on purpose: the silent-tool check below reuses this file.
+        ("busy", AgentState::Idle, AgentState::Active),
     ] {
         fs::write(dir.path().join("42.json"), fixture(status, 20000)).unwrap();
         assert_eq!(read(&registry, hook, 12000).unwrap().unwrap().0, expected);
@@ -73,8 +78,11 @@ fn explicit_wait_compaction_and_shell_states() {
                 PID,
                 "s",
                 millis(9000).unwrap(),
-                AgentState::Active,
-                millis(12000).unwrap(),
+                LastHook {
+                    state: AgentState::Active,
+                    time: millis(12000).unwrap(),
+                    subagent: false,
+                },
                 millis(86_400_000).unwrap()
             )
             .unwrap()
@@ -182,4 +190,33 @@ fn transient_partial_writes_do_not_notify_and_recovery_clears_diagnostic() {
     assert!(health.current.is_some());
     health.observe(None, now + Duration::from_secs(32));
     assert!(health.current.is_none());
+}
+
+#[test]
+fn late_subagent_hook_does_not_revive_an_idle_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = Registry::new(dir.path().into());
+    let read = |status: &str, subagent_hook: bool| {
+        fs::write(dir.path().join("42.json"), fixture(status, 11000)).unwrap();
+        registry
+            .read(
+                PID,
+                "s",
+                millis(9000).unwrap(),
+                LastHook {
+                    state: AgentState::Active,
+                    time: millis(15000).unwrap(),
+                    subagent: subagent_hook,
+                },
+                millis(30000).unwrap(),
+            )
+            .unwrap()
+            .map(|(state, _)| state)
+    };
+    // Observed on 2.1.285: registry idle, then SubagentStop minutes later.
+    assert_eq!(read("idle", true), Some(AgentState::Idle));
+    assert_eq!(read("shell", true), Some(AgentState::Idle));
+    // An ordinary newer hook still wins, and so does a subagent of a busy turn.
+    assert_eq!(read("idle", false), None);
+    assert_eq!(read("busy", true), None);
 }

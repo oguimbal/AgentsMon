@@ -73,10 +73,17 @@ connecte pas au socket de messagerie entre agents.
 | `status` | État AgentsMon |
 | --- | --- |
 | `busy` | Active, vert ; conserve Compacting si le hook courant l’indique |
-| `shell` | Active, vert |
+| `shell` | Idle, gris : tour terminé, shell lancé en arrière-plan encore vivant |
 | `waiting` | Waiting, orange |
 | `idle` | Idle, gris |
 | valeur inconnue | Repli sur les hooks, diagnostic après persistance |
+
+`shell` est publié quand le tour est `idle` mais qu’au moins une tâche
+`local_bash` d’arrière-plan n’est pas terminée (serveur de dev lancé par
+l’agent, par exemple) : binaire 2.1.285, `status = idle && tâche bash vivante ?
+"shell" : status`. Si le modèle attendait ce shell, son tour serait `busy`.
+Jusqu’au 30 septembre 2026 AgentsMon l’affichait en vert, ce qui laissait une
+session terminée « active » tant que le serveur tournait.
 
 `updatedAt` n’est **pas** utilisé : un renommage ou une autre modification de
 métadonnées peut l’avancer sans transition de statut. Le lecteur n’interprète
@@ -131,6 +138,20 @@ correspondant dans `subagents/`. Le binaire contient des agents internes forkés
 sans transcript (`away_summary`, `extract_memories`, `auto_dream`…) ; ce sont des
 sources possibles, l’émetteur exact n’a pas été établi. L’état AgentsMon juste
 avant ce hook, écrasé depuis, n’a pas pu être vérifié.
+
+Ce même cas s’est reproduit le 30 septembre 2026 (session « devops », CLI
+2.1.285, hôte Warp) malgré la fusion en heartbeat : le record n’était pas Idle
+quand `SubagentStop` est arrivé, car le hook `Stop` avait écrit `active`
+(« background task ») à cause de shells en arrière-plan. Deux corrections :
+
+- `Stop` ne reste Active que si `background_tasks` contient du travail
+  d’agent (`subagent`, `workflow`, `teammate`, `cloud session`). Des `shell`,
+  `monitor`, `MCP task`, `dream` ou `auto-mode scan` seuls donnent Idle. Seul
+  le champ `type` de chaque tâche est décodé ; `command` et `description`
+  contiennent du texte et ne sont pas lus.
+- Côté provider, quand le dernier hook est `SubagentStart`/`SubagentStop`, un
+  registre `idle`/`shell` s’applique même s’il est plus ancien que ce hook. Un
+  tour principal repris republie `busy`, qui reste soumis à la règle normale.
 
 Limite connue : si un tel agent demande une autorisation après la fin du tour,
 la carte passe Waiting puis son `PostToolUse` suivant la remet Active.
