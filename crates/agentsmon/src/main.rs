@@ -6,12 +6,13 @@ use std::time::{Duration, Instant};
 
 use agentsmon_core::{AgentStore, GroupKey, ProviderStatus, Slot};
 use agentsmon_providers::{
-    AgentProvider, ClaudeProvider, CodexProvider, ProviderWatcher, VibeProvider,
+    AgentProvider, ClaudeProvider, CodexProvider, OpenClawProvider, ProviderWatcher, VibeProvider,
 };
 use agentsmon_ui::{
-    agent_details_height, menu_size, natural_width, provider_details_height, rename_height,
-    rename_key_bindings, AgentDetailsView, Layout, MonitorEvent, MonitorView, ProviderDetailsView,
-    RenameEvent, RenameKey, RenameTarget, RenameView,
+    action_menu_height, agent_details_height, menu_size, natural_width, provider_details_height,
+    rename_height, rename_key_bindings, ActionMenuEvent, ActionMenuView, AgentDetailsView, Layout,
+    MenuAction, MonitorEvent, MonitorView, ProviderDetailsView, RenameEvent, RenameKey,
+    RenameTarget, RenameView,
 };
 use gpui::{
     actions, point, px, size, AnyWindowHandle, App, AppContext, AsyncApp, Bounds, DisplayId,
@@ -31,6 +32,8 @@ const DETAILS_WIDTH: f32 = 400.0;
 const DETAILS_GAP: f32 = 6.0;
 const RENAME_WINDOW_TITLE: &str = "Renommer la conversation";
 const MENU_WINDOW_TITLE: &str = "Conversations du groupe";
+const ACTIONS_WINDOW_TITLE: &str = "Actions des providers";
+const ACTIONS_MENU_WIDTH: f32 = 200.0;
 /// How long the pointer may be outside both a group card and its menu before
 /// the menu closes; covers the travel between the two.
 const MENU_GRACE: Duration = Duration::from_millis(300);
@@ -76,11 +79,15 @@ struct AppStateInner {
     store: RefCell<AgentStore>,
     provider_statuses: RefCell<Vec<ProviderStatus>>,
     providers: Vec<Arc<dyn AgentProvider>>,
+    /// Also in `providers`; kept typed for its connect flow.
+    openclaw: Arc<OpenClawProvider>,
     watchers: RefCell<Vec<ProviderWatcher>>,
     panels: RefCell<Vec<Panel>>,
     x_offset: RefCell<f32>,
     details_window: RefCell<Option<AnyWindowHandle>>,
     rename_window: RefCell<Option<AnyWindowHandle>>,
+    actions_menu: RefCell<Option<AnyWindowHandle>>,
+    openclaw_window: RefCell<Option<AnyWindowHandle>>,
     group_menu: RefCell<Option<GroupMenu>>,
     unread: RefCell<HashSet<agentsmon_core::AgentId>>,
     notifications: notification::NativeNotifications,
@@ -97,10 +104,12 @@ fn main() {
         .init();
 
     application().run(|cx| {
+        let openclaw = Arc::new(OpenClawProvider::new());
         let providers: Vec<Arc<dyn AgentProvider>> = vec![
             Arc::new(ClaudeProvider::new()),
             Arc::new(CodexProvider::new()),
             Arc::new(VibeProvider::new()),
+            openclaw.clone(),
         ];
         let watchers: Vec<_> = providers
             .iter()
@@ -127,11 +136,14 @@ fn main() {
             store: RefCell::new(store),
             provider_statuses: RefCell::new(Vec::new()),
             providers,
+            openclaw,
             watchers: RefCell::new(watchers),
             panels: RefCell::new(Vec::new()),
             x_offset: RefCell::new(0.0),
             details_window: RefCell::new(None),
             rename_window: RefCell::new(None),
+            actions_menu: RefCell::new(None),
+            openclaw_window: RefCell::new(None),
             group_menu: RefCell::new(None),
             unread: RefCell::new(HashSet::new()),
             notifications: notification::NativeNotifications::new(),
@@ -253,6 +265,9 @@ fn refresh(state: &AppState, cx: &mut App) {
     let mut snapshots = Vec::new();
     let mut provider_statuses = Vec::new();
     for provider in &state.0.providers {
+        if !provider.is_enabled() {
+            continue;
+        }
         let usage = match provider.usage() {
             Ok(usage) => usage,
             Err(error) => {
@@ -592,6 +607,11 @@ fn handle_event(
                 cx,
             );
         }
+        MonitorEvent::ProvidersMenu { anchor_x } => {
+            close_group_menu(state, cx);
+            let actions = openclaw_integration::menu_actions(&state.0.openclaw);
+            open_actions_menu(state, display_id, display_bounds, *anchor_x, actions, cx);
+        }
     }
 }
 
@@ -639,6 +659,7 @@ fn handle_menu_event(event: &MonitorEvent, state: &AppState, cx: &mut App) {
         | MonitorEvent::MoveBarBy(_)
         | MonitorEvent::ShowProviderDetails { .. }
         | MonitorEvent::ShowGroup { .. }
+        | MonitorEvent::ProvidersMenu { .. }
         | MonitorEvent::LeaveGroup => {}
     }
 }
@@ -804,7 +825,7 @@ fn open_rename(
     }) {
         Ok(handle) => {
             *state.0.rename_window.borrow_mut() = Some(handle.into());
-            configure_native_rename();
+            configure_native_popup(RENAME_WINDOW_TITLE);
             let Some(entity) = entity_slot.borrow().clone() else {
                 return;
             };
@@ -832,6 +853,101 @@ fn open_rename(
     }
 }
 
+fn close_actions_menu(state: &AppState, cx: &mut App) {
+    if let Some(handle) = state.0.actions_menu.borrow_mut().take() {
+        let _ = cx.update_window(handle, |_, window, _| window.remove_window());
+    }
+}
+
+/// The provider actions menu, opened above the provider icons. Nothing opens
+/// when no provider has an action to offer.
+fn open_actions_menu(
+    state: &AppState,
+    display_id: DisplayId,
+    display_bounds: Bounds<Pixels>,
+    anchor_x: f32,
+    actions: Vec<MenuAction>,
+    cx: &mut App,
+) {
+    close_details(state, cx);
+    close_rename(state, cx);
+    close_actions_menu(state, cx);
+    if actions.is_empty() {
+        return;
+    }
+    let panel_x = display_bounds.origin.x.as_f32() + *state.0.x_offset.borrow();
+    let min_x = display_bounds.origin.x.as_f32() + 6.0;
+    let max_x =
+        (display_bounds.origin.x + display_bounds.size.width).as_f32() - ACTIONS_MENU_WIDTH - 6.0;
+    let x = (panel_x + anchor_x - 12.0).clamp(min_x, max_x.max(min_x));
+    let height = action_menu_height(actions.len());
+    let y = (display_bounds.origin.y + display_bounds.size.height).as_f32()
+        - BAR_HEIGHT
+        - DETAILS_GAP
+        - height;
+    let options = WindowOptions {
+        titlebar: None,
+        window_bounds: Some(WindowBounds::Windowed(Bounds {
+            origin: point(px(x), px(y)),
+            size: size(px(ACTIONS_MENU_WIDTH), px(height)),
+        })),
+        kind: WindowKind::PopUp,
+        is_movable: false,
+        is_resizable: false,
+        is_minimizable: false,
+        focus: true,
+        show: true,
+        display_id: Some(display_id),
+        window_background: WindowBackgroundAppearance::Transparent,
+        app_id: Some("com.oliv.AgentsMon.actions".into()),
+        ..Default::default()
+    };
+    let entity_slot = Rc::new(RefCell::new(None));
+    let slot = entity_slot.clone();
+    match cx.open_window(options, move |window, cx| {
+        window.set_window_title(ACTIONS_WINDOW_TITLE);
+        let entity = cx.new(|cx| ActionMenuView::new(actions, window, cx));
+        *slot.borrow_mut() = Some(entity.clone());
+        entity
+    }) {
+        Ok(handle) => {
+            *state.0.actions_menu.borrow_mut() = Some(handle.into());
+            configure_native_popup(ACTIONS_WINDOW_TITLE);
+            let Some(entity) = entity_slot.borrow().clone() else {
+                return;
+            };
+            let event_state = state.clone();
+            cx.subscribe(&entity, move |_, event, cx| {
+                close_actions_menu(&event_state, cx);
+                match event {
+                    ActionMenuEvent::Select(id) if id == openclaw_integration::CONNECT_ACTION => {
+                        open_openclaw_connect(&event_state, cx)
+                    }
+                    ActionMenuEvent::Select(_) | ActionMenuEvent::Dismiss => {}
+                }
+            })
+            .detach();
+        }
+        Err(error) => tracing::warn!(%error, "cannot open provider actions menu"),
+    }
+}
+
+fn open_openclaw_connect(state: &AppState, cx: &mut App) {
+    if let Some(handle) = state.0.openclaw_window.borrow_mut().take() {
+        let _ = cx.update_window(handle, |_, window, _| window.remove_window());
+    }
+    let refresh_state = state.clone();
+    let handle = openclaw_integration::open_connect_window(
+        cx,
+        state.0.openclaw.clone(),
+        Rc::new(move |cx| {
+            refresh(&refresh_state, cx);
+            reconcile_displays(cx, &refresh_state, false);
+        }),
+    );
+    *state.0.openclaw_window.borrow_mut() = handle;
+}
+
 fn provider_display_name(state: &AppState, provider_id: &str) -> String {
     state
         .0
@@ -842,10 +958,20 @@ fn provider_display_name(state: &AppState, provider_id: &str) -> String {
         .unwrap_or_else(|| provider_id.to_owned())
 }
 
+/// A click on a card or a notification. The click itself acknowledges the
+/// session, so its unread mark goes even when the host cannot be focused
+/// (e.g. a Warp tab). IPC consumers keep the stricter `focus_agent_result`.
 fn focus_agent(id: &agentsmon_core::AgentId, state: &AppState, cx: &mut App) {
     if let Err(code) = focus_agent_result(id, state, cx) {
         tracing::warn!(code, session = %id.session_id, "focus failed");
+        mark_read(id, state, cx);
     }
+}
+
+fn mark_read(id: &agentsmon_core::AgentId, state: &AppState, cx: &mut App) {
+    state.0.unread.borrow_mut().remove(id);
+    state.0.notifications.close(id);
+    broadcast(state, cx);
 }
 
 fn focus_agent_result(
@@ -872,9 +998,7 @@ fn focus_agent_result(
         tracing::warn!(%error, session = %id.session_id, provider = %id.provider, "focus failed");
         "focus_failed"
     })?;
-    state.0.unread.borrow_mut().remove(id);
-    state.0.notifications.close(id);
-    broadcast(state, cx);
+    mark_read(id, state, cx);
     Ok(())
 }
 
@@ -1304,8 +1428,9 @@ fn configure_native_details() {
     }
 }
 
+/// Floating, key-taking pop-up (rename prompt, actions menu) found by title.
 #[cfg(target_os = "macos")]
-fn configure_native_rename() {
+fn configure_native_popup(title: &str) {
     use objc2::MainThreadMarker;
     use objc2_app_kit::{NSApplication, NSFloatingWindowLevel, NSWindowCollectionBehavior};
 
@@ -1315,7 +1440,7 @@ fn configure_native_rename() {
     let app = NSApplication::sharedApplication(mtm);
     for index in 0..app.windows().count() {
         let window = app.windows().objectAtIndex(index);
-        if window.title().to_string() != RENAME_WINDOW_TITLE {
+        if window.title().to_string() != title {
             continue;
         }
         let Some(screen) = window.screen() else {
@@ -1337,7 +1462,7 @@ fn configure_native_rename() {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn configure_native_rename() {}
+fn configure_native_popup(_title: &str) {}
 
 /// The group menu behaves like the bars: floating, on every space, and a
 /// non-activating panel so clicking a member never brings AgentsMon forward.
@@ -1750,4 +1875,5 @@ fn move_native_panels(x_offset: f32) {
 
 mod codex_integration;
 mod integration;
+mod openclaw_integration;
 mod vibe_integration;

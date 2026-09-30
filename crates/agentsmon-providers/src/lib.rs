@@ -4,6 +4,7 @@ mod codex;
 #[cfg(unix)]
 mod codex_ipc;
 mod focus;
+pub mod openclaw;
 mod process;
 pub mod vibe;
 
@@ -14,6 +15,7 @@ use anyhow::Result;
 
 pub use claude::{CStatusRecord, ClaudeProvider, ProviderWatcher};
 pub use codex::{CodexApprovalsReviewer, CodexProvider, CodexStatusRecord};
+pub use openclaw::OpenClawProvider;
 pub use vibe::{VibeProvider, VibeStatusRecord};
 
 /// Provider-owned, content-free diagnostic. `details` must never contain remote
@@ -37,6 +39,11 @@ pub trait AgentProvider: Send + Sync {
     /// this provider's sessions, so agents on the same repository stay apart.
     fn accent_rgb(&self) -> Option<u32> {
         None
+    }
+    /// A provider that needs explicit setup (e.g. a remote gateway) stays out
+    /// of the bar until configured.
+    fn is_enabled(&self) -> bool {
+        true
     }
     fn discover(&self) -> Result<Vec<AgentSnapshot>>;
     fn usage(&self) -> Result<Option<ProviderUsage>>;

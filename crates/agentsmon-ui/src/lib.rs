@@ -1,7 +1,12 @@
 //! GPUI views for AgentsMon.
 
+mod connect;
 mod diagnostic_report;
 mod text_input;
+pub use connect::{
+    action_menu_height, ActionMenuEvent, ActionMenuView, ConnectEvent, ConnectField, ConnectStatus,
+    ConnectView, MenuAction,
+};
 pub use diagnostic_report::DiagnosticReportView;
 
 use std::collections::{HashMap, HashSet};
@@ -82,6 +87,10 @@ pub enum MonitorEvent {
     /// Right click on a card: open the rename prompt.
     Rename {
         target: Box<RenameTarget>,
+        anchor_x: f32,
+    },
+    /// Right click on the provider icons: open the provider actions menu.
+    ProvidersMenu {
         anchor_x: f32,
     },
 }
@@ -417,13 +426,28 @@ impl MonitorView {
                 }
             }));
 
-        let root = root
+        let providers = div()
+            .id("providers")
+            .flex()
+            .items_center()
+            .gap(px(3.0))
             .children(
                 self.providers
                     .clone()
                     .into_iter()
                     .map(|provider| self.render_provider(provider, cx)),
             )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|_, event: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    cx.emit(MonitorEvent::ProvidersMenu {
+                        anchor_x: event.position.x.as_f32(),
+                    });
+                }),
+            );
+        let root = root
+            .child(providers)
             .when(!self.providers.is_empty(), |root| {
                 root.child(div().w(px(1.0)).h(px(13.0)).bg(rgb(0x3b3d44)))
             });
@@ -1251,6 +1275,7 @@ impl RenameView {
                 this.was_active = false;
                 cx.emit(RenameEvent::Cancel);
             }
+            TextInputEvent::Tab => {}
         });
         // Clicking anywhere else dismisses the prompt, like a native rename field.
         let activation = cx.observe_window_activation(window, |this, window, cx| {

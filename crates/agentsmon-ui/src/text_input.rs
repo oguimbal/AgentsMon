@@ -1,6 +1,7 @@
 //! Minimal single-line text field for GPUI, derived from the upstream
-//! `gpui/examples/input.rs`. Only what the rename prompt needs: typing, IME
-//! composition, arrow/home/end navigation, selection, clipboard and select-all.
+//! `gpui/examples/input.rs`. Only what the prompts need: typing, IME
+//! composition, arrow/home/end navigation, selection, clipboard, select-all,
+//! Tab between fields and a masked mode for secrets.
 
 use std::ops::Range;
 
@@ -31,6 +32,7 @@ actions!(
         Copy,
         Confirm,
         Cancel,
+        Tab,
     ]
 );
 
@@ -63,6 +65,8 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-x", Cut, ctx),
         KeyBinding::new("enter", Confirm, ctx),
         KeyBinding::new("escape", Cancel, ctx),
+        KeyBinding::new("tab", Tab, ctx),
+        KeyBinding::new("shift-tab", Tab, ctx),
     ]
 }
 
@@ -70,7 +74,12 @@ pub fn key_bindings() -> Vec<KeyBinding> {
 pub enum TextInputEvent {
     Confirm,
     Cancel,
+    /// Tab or Shift-Tab: move to the other field of a form.
+    Tab,
 }
+
+/// Glyph drawn for each character of a masked field.
+const MASK: char = '•';
 
 pub struct TextInput {
     focus_handle: FocusHandle,
@@ -81,6 +90,8 @@ pub struct TextInput {
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
+    /// Secrets: drawn as bullets, never copied or cut to the clipboard.
+    masked: bool,
 }
 
 impl gpui::EventEmitter<TextInputEvent> for TextInput {}
@@ -99,11 +110,49 @@ impl TextInput {
             last_layout: None,
             last_bounds: None,
             is_selecting: false,
+            masked: false,
+        }
+    }
+
+    /// An empty field whose content is drawn as bullets.
+    pub fn masked(cx: &mut Context<Self>) -> Self {
+        Self {
+            masked: true,
+            ..Self::new("", cx)
         }
     }
 
     pub fn text(&self) -> &str {
         &self.content
+    }
+
+    /// What the line shows: the content, or one bullet per character.
+    fn display_text(&self) -> SharedString {
+        if self.masked {
+            MASK.to_string().repeat(self.content.chars().count()).into()
+        } else {
+            self.content.clone()
+        }
+    }
+
+    /// Content byte offset to the matching offset in `display_text`.
+    fn display_offset(&self, offset: usize) -> usize {
+        if self.masked {
+            self.content[..offset].chars().count() * MASK.len_utf8()
+        } else {
+            offset
+        }
+    }
+
+    /// `display_text` byte offset back to the content.
+    fn content_offset(&self, index: usize) -> usize {
+        if !self.masked {
+            return index;
+        }
+        self.content
+            .char_indices()
+            .nth(index / MASK.len_utf8())
+            .map_or(self.content.len(), |(offset, _)| offset)
     }
 
     fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
@@ -173,6 +222,10 @@ impl TextInput {
         cx.emit(TextInputEvent::Cancel);
     }
 
+    fn tab(&mut self, _: &Tab, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(TextInputEvent::Tab);
+    }
+
     fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
@@ -204,7 +257,7 @@ impl TextInput {
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.selected_range.is_empty() {
+        if !self.selected_range.is_empty() && !self.masked {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_string(),
             ));
@@ -212,7 +265,7 @@ impl TextInput {
     }
 
     fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.selected_range.is_empty() {
+        if !self.selected_range.is_empty() && !self.masked {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_string(),
             ));
@@ -247,7 +300,7 @@ impl TextInput {
         if position.y > bounds.bottom() {
             return self.content.len();
         }
-        line.closest_index_for_x(position.x - bounds.left())
+        self.content_offset(line.closest_index_for_x(position.x - bounds.left()))
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -414,11 +467,11 @@ impl EntityInputHandler for TextInput {
         let range = self.range_from_utf16(&range_utf16);
         Some(Bounds::from_corners(
             point(
-                bounds.left() + last_layout.x_for_index(range.start),
+                bounds.left() + last_layout.x_for_index(self.display_offset(range.start)),
                 bounds.top(),
             ),
             point(
-                bounds.left() + last_layout.x_for_index(range.end),
+                bounds.left() + last_layout.x_for_index(self.display_offset(range.end)),
                 bounds.bottom(),
             ),
         ))
@@ -433,7 +486,7 @@ impl EntityInputHandler for TextInput {
         let line_point = self.last_bounds?.localize(&point)?;
         let last_layout = self.last_layout.as_ref()?;
         let utf8_index = last_layout.index_for_x(point.x - line_point.x)?;
-        Some(self.offset_to_utf16(utf8_index))
+        Some(self.offset_to_utf16(self.content_offset(utf8_index)))
     }
 }
 
@@ -490,9 +543,10 @@ impl Element for TextElement {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let input = self.input.read(cx);
-        let content = input.content.clone();
-        let selected_range = input.selected_range.clone();
-        let cursor = input.cursor_offset();
+        let content = input.display_text();
+        let selected_range = input.display_offset(input.selected_range.start)
+            ..input.display_offset(input.selected_range.end);
+        let cursor = input.display_offset(input.cursor_offset());
         let style = window.text_style();
 
         let run = TextRun {
@@ -503,7 +557,11 @@ impl Element for TextElement {
             underline: None,
             strikethrough: None,
         };
-        let runs = if let Some(marked_range) = input.marked_range.as_ref() {
+        let marked_range = input
+            .marked_range
+            .as_ref()
+            .map(|range| input.display_offset(range.start)..input.display_offset(range.end));
+        let runs = if let Some(marked_range) = marked_range.as_ref() {
             vec![
                 TextRun {
                     len: marked_range.start,
@@ -635,6 +693,7 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::confirm))
             .on_action(cx.listener(Self::cancel))
+            .on_action(cx.listener(Self::tab))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))

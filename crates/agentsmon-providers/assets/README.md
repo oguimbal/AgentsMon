@@ -15,3 +15,7 @@ an SVG renderer or oversized bitmap at runtime.
   for visibility on the dark panel.
 
 The files preserve the official geometry and are resized for the micro UI.
+
+- `openclaw-16.png`: OpenClaw lobster favicon from the Control UI,
+  <https://github.com/openclaw/openclaw/blob/main/ui/public/favicon-32.png>
+  (MIT, OpenClaw Foundation), resized from 32×32.

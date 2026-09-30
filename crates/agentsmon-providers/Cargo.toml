@@ -17,6 +17,12 @@ crossbeam-channel = { workspace = true }
 sysinfo = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
+tungstenite = { version = "0.30.0", features = ["rustls-tls-native-roots"] }
+ed25519-dalek = "3.0.0"
+sha2 = "0.11.0"
+base64 = "0.23.1"
+getrandom = "0.4.3"
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
