@@ -65,6 +65,8 @@ pub struct RecordUpdate<'a> {
     pub context_percentage: Option<f32>,
     pub rate_limits: Option<ClaudeRateLimits>,
     pub title: Option<String>,
+    /// Subagent activity: cannot wake a session whose main turn has ended.
+    pub keeps_idle: bool,
 }
 
 pub fn path_from_transcript(transcript: &str, session_id: &str) -> Result<PathBuf> {
@@ -74,7 +76,7 @@ pub fn path_from_transcript(transcript: &str, session_id: &str) -> Result<PathBu
     Ok(parent.join(format!("{session_id}.agentsmon.cstatus")))
 }
 
-pub fn merge_record(path: &Path, update: RecordUpdate<'_>) -> Result<()> {
+pub fn merge_record(path: &Path, mut update: RecordUpdate<'_>) -> Result<()> {
     let parent = path.parent().context("cstatus path has no parent")?;
     fs::create_dir_all(parent)?;
     let lock_path = path.with_extension("cstatus.lock");
@@ -89,6 +91,12 @@ pub fn merge_record(path: &Path, update: RecordUpdate<'_>) -> Result<()> {
     let previous = fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<StatusRecord>(&bytes).ok());
+    if update.keeps_idle && previous.as_ref().is_some_and(|r| r.state == "idle") {
+        // Merge like a heartbeat so a newer registry status still wins.
+        update.state = "";
+        update.event = "";
+        update.activity.clear();
+    }
     let environment = EnvironmentMetadata::current();
     let now = Utc::now().to_rfc3339();
     let record = StatusRecord {
@@ -346,6 +354,7 @@ mod tests {
             context_percentage: percentage,
             rate_limits: None,
             title: None,
+            keeps_idle: false,
         }
     }
 
@@ -433,6 +442,45 @@ mod tests {
             path_from_transcript("/tmp/project/session.jsonl", "session").unwrap(),
             PathBuf::from("/tmp/project/session.agentsmon.cstatus")
         );
+    }
+
+    #[test]
+    fn subagent_hooks_do_not_wake_an_idle_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.cstatus");
+        let subagent = |state| RecordUpdate {
+            state,
+            event: "SubagentStop",
+            activity: String::new(),
+            keeps_idle: state == "active",
+            ..update(None)
+        };
+        let read = || serde_json::from_slice::<StatusRecord>(&fs::read(&path).unwrap()).unwrap();
+        merge_record(
+            &path,
+            RecordUpdate {
+                state: "idle",
+                event: "Stop",
+                activity: String::new(),
+                ..update(None)
+            },
+        )
+        .unwrap();
+        let mut stopped = read();
+        stopped.event_timestamp = Some("2026-09-30T11:08:54Z".into());
+        fs::write(&path, serde_json::to_vec(&stopped).unwrap()).unwrap();
+
+        merge_record(&path, subagent("active")).unwrap();
+        let after = read();
+        assert_eq!(after.state, "idle");
+        assert_eq!(after.event, "Stop");
+        assert_eq!(after.event_timestamp, stopped.event_timestamp);
+
+        // During a turn, or after a subagent permission prompt, it applies.
+        merge_record(&path, subagent("waiting")).unwrap();
+        assert_eq!(read().state, "waiting");
+        merge_record(&path, subagent("active")).unwrap();
+        assert_eq!(read().state, "active");
     }
 
     #[test]

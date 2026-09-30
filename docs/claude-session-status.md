@@ -118,6 +118,23 @@ porte pas d’`agent_id`. L’interruption d’un sous-agent ne prouve pas à el
 la fin du tour principal. Un échec ordinaire ou un hook d’une ancienne version
 sans ce champ reste Active.
 
+Un hook portant un `agent_id` (`SubagentStart`, `SubagentStop`, outils d’un
+sous-agent…) qui calculerait Active sur un record déjà Idle est fusionné comme
+un heartbeat : état, activité, dernier événement et `event_timestamp` sont
+conservés, et un statut plus récent du registre continue de s’appliquer. Les
+demandes d’autorisation d’un sous-agent restent Waiting, et un sous-agent
+pendant un tour actif ne change rien.
+
+Constaté le 30 septembre 2026 sur une session CLI 2.1.285 restée verte : registre
+`idle`, puis `SubagentStop` environ trois minutes plus tard, sans transcript
+correspondant dans `subagents/`. Le binaire contient des agents internes forkés
+sans transcript (`away_summary`, `extract_memories`, `auto_dream`…) ; ce sont des
+sources possibles, l’émetteur exact n’a pas été établi. L’état AgentsMon juste
+avant ce hook, écrasé depuis, n’a pas pu être vérifié.
+
+Limite connue : si un tel agent demande une autorisation après la fin du tour,
+la carte passe Waiting puis son `PostToolUse` suivant la remet Active.
+
 Les données restent dans le provider Claude et le helper. Le store, le rendu
 GPUI, les autres panneaux et l’export local reçoivent le même `AgentSnapshot`
 que pour les autres sources. Aucun comportement Claude n’est ajouté à l’UI.
@@ -267,3 +284,6 @@ Claude avec le binaire récent, envoyer un prompt, interrompre pendant la
 réflexion, puis envoyer un nouveau prompt. Attendre gris après interruption,
 vert au nouveau prompt. Refaire pendant un outil et une demande d’autorisation.
 Ne pas interrompre une session utilisateur automatiquement pour tester.
+
+Dans une session CLI, terminer un tour, vérifier gris, puis laisser le terminal
+sans interaction plus de trois minutes : la carte doit rester grise.

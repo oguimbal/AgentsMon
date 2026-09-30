@@ -79,6 +79,10 @@ fn process_hook(input: &[u8]) -> Result<()> {
             context_percentage: transcript.context_percentage,
             rate_limits: None,
             title: transcript.title,
+            // Claude Code runs internal forked agents (away summary, memory
+            // extraction...) after the main turn ended; their hooks carry an
+            // agent_id and must not turn an idle session green again.
+            keeps_idle: hook.agent_id.is_some() && state == "active",
         },
     )
 }

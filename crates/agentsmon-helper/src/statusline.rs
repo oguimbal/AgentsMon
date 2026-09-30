@@ -68,6 +68,7 @@ pub fn proxy(input: &[u8]) -> Result<()> {
                 context_percentage: percentage,
                 rate_limits: rate_limits.clone(),
                 title: None,
+                keeps_idle: false,
             },
         )?;
     }
