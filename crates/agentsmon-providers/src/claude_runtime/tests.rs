@@ -216,6 +216,8 @@ fn late_subagent_hook_does_not_revive_an_idle_turn() {
     // Observed on 2.1.285: registry idle, then SubagentStop minutes later.
     assert_eq!(read("idle", true), Some(AgentState::Idle));
     assert_eq!(read("shell", true), Some(AgentState::Idle));
+    // Observed on 2.1.281 (VS Code): a question, then SubagentStop.
+    assert_eq!(read("waiting", true), Some(AgentState::Waiting));
     // An ordinary newer hook still wins, and so does a subagent of a busy turn.
     assert_eq!(read("idle", false), None);
     assert_eq!(read("busy", true), None);

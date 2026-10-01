@@ -153,6 +153,17 @@ quand `SubagentStop` est arrivé, car le hook `Stop` avait écrit `active`
   registre `idle`/`shell` s’applique même s’il est plus ancien que ce hook. Un
   tour principal repris republie `busy`, qui reste soumis à la règle normale.
 
+Même mécanisme le 1er octobre 2026 sur une session VS Code 2.1.281 (« edf ») :
+registre `waiting` (question posée), puis `SubagentStop` quatre minutes plus
+tard, et la carte repassait verte. La protection couvre donc aussi l’attente :
+
+- côté provider, un registre `waiting` s’applique lui aussi sur un hook
+  `SubagentStart`/`SubagentStop` plus récent ;
+- côté helper, le record retient si son dernier hook venait d’un sous-agent
+  (`subagent`). Un hook de sous-agent Active est fusionné en heartbeat sur un
+  record Idle, ou Waiting **du tour principal**. Une demande d’autorisation
+  émise par un sous-agent se termine toujours quand ce sous-agent reprend.
+
 Hook `Notification` : seuls `permission_prompt`, `worker_permission_prompt`,
 `elicitation_dialog`, `elicitation_url_dialog` et `agent_needs_input` (ou une
 notification sans type, anciennes versions) donnent Waiting. `idle_prompt`,

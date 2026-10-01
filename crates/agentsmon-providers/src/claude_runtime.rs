@@ -183,10 +183,11 @@ impl Registry {
             ));
         }
         // A new prompt/hook beats an old registry idle, except a subagent
-        // lifecycle hook: once the main turn published idle, a later
-        // SubagentStart/SubagentStop comes from a background or internal
-        // forked agent, and a resumed main turn republishes busy anyway.
-        if timestamp <= hook.time && !(hook.subagent && state == AgentState::Idle) {
+        // lifecycle hook: once the main turn published idle or waiting, a
+        // later SubagentStart/SubagentStop comes from a background or
+        // internal forked agent, and a resumed main turn republishes busy.
+        let resting = matches!(state, AgentState::Idle | AgentState::Waiting);
+        if timestamp <= hook.time && !(hook.subagent && resting) {
             return Ok(None);
         }
         let state = if state == AgentState::Active && hook.state == AgentState::Compacting {

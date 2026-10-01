@@ -37,6 +37,9 @@ struct StatusRecord {
     /// Conversation title assigned by Claude Code or chosen with `/rename`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     title: Option<String>,
+    /// The last lifecycle hook came from a subagent (it carried an agent_id).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    subagent: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,8 +68,9 @@ pub struct RecordUpdate<'a> {
     pub context_percentage: Option<f32>,
     pub rate_limits: Option<ClaudeRateLimits>,
     pub title: Option<String>,
-    /// Subagent activity: cannot wake a session whose main turn has ended.
-    pub keeps_idle: bool,
+    /// The hook carries an agent_id. Subagent activity cannot wake a session
+    /// whose main turn has ended or waits for the user.
+    pub subagent: bool,
 }
 
 pub fn path_from_transcript(transcript: &str, session_id: &str) -> Result<PathBuf> {
@@ -91,7 +95,13 @@ pub fn merge_record(path: &Path, mut update: RecordUpdate<'_>) -> Result<()> {
     let previous = fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<StatusRecord>(&bytes).ok());
-    if update.keeps_idle && previous.as_ref().is_some_and(|r| r.state == "idle") {
+    // Background and internal forked agents keep running after the main turn
+    // ended or while it waits for an answer. A wait raised by a subagent
+    // itself (its permission prompt) still ends when that subagent resumes.
+    let resting = previous
+        .as_ref()
+        .is_some_and(|r| r.state == "idle" || (r.state == "waiting" && !r.subagent));
+    if update.subagent && update.state == "active" && resting {
         // Merge like a heartbeat so a newer registry status still wins.
         update.state = "";
         update.event = "";
@@ -174,6 +184,11 @@ pub fn merge_record(path: &Path, mut update: RecordUpdate<'_>) -> Result<()> {
         title: update
             .title
             .or_else(|| previous.as_ref().and_then(|r| r.title.clone())),
+        subagent: if update.event.is_empty() {
+            previous.as_ref().is_some_and(|r| r.subagent)
+        } else {
+            update.subagent
+        },
     };
 
     let temp = path.with_extension(format!("cstatus.tmp.{}", std::process::id()));
@@ -354,7 +369,7 @@ mod tests {
             context_percentage: percentage,
             rate_limits: None,
             title: None,
-            keeps_idle: false,
+            subagent: false,
         }
     }
 
@@ -452,7 +467,7 @@ mod tests {
             state,
             event: "SubagentStop",
             activity: String::new(),
-            keeps_idle: state == "active",
+            subagent: true,
             ..update(None)
         };
         let read = || serde_json::from_slice::<StatusRecord>(&fs::read(&path).unwrap()).unwrap();
@@ -481,6 +496,23 @@ mod tests {
         assert_eq!(read().state, "waiting");
         merge_record(&path, subagent("active")).unwrap();
         assert_eq!(read().state, "active");
+
+        // A question of the main turn stays a wait while subagents finish.
+        merge_record(
+            &path,
+            RecordUpdate {
+                state: "waiting",
+                event: "PermissionRequest",
+                activity: "input".into(),
+                ..update(None)
+            },
+        )
+        .unwrap();
+        merge_record(&path, subagent("active")).unwrap();
+        let after = read();
+        assert_eq!(after.state, "waiting");
+        assert_eq!(after.event, "PermissionRequest");
+        assert!(!after.subagent);
     }
 
     #[test]
