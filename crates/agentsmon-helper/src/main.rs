@@ -82,6 +82,12 @@ fn process_hook(input: &[u8]) -> Result<()> {
     }
 
     let (state, activity) = event_state(&hook);
+    // Informational hooks only refresh the record, like a status-line beat.
+    let event = if state.is_empty() {
+        ""
+    } else {
+        hook.hook_event_name.as_str()
+    };
     let (pid, ppid) = record::claude_process_ids();
     // Sessions without a status line (VS Code, claude.ai) only learn their
     // context usage from the transcript tail, which also carries the title.
@@ -93,7 +99,7 @@ fn process_hook(input: &[u8]) -> Result<()> {
             pid,
             ppid,
             cwd: &hook.cwd,
-            event: &hook.hook_event_name,
+            event,
             state,
             activity,
             context_percentage: transcript.context_percentage,
@@ -117,16 +123,7 @@ fn event_state(input: &HookInput) -> (&'static str, String) {
         "PreToolUse" if input.tool_name.as_deref() == Some("ExitPlanMode") => {
             ("waiting", "input".into())
         }
-        "Notification" if input.notification_type.as_deref() == Some("auth_success") => {
-            ("active", "auth_success".into())
-        }
-        "Notification" => (
-            "waiting",
-            input
-                .notification_type
-                .clone()
-                .unwrap_or_else(|| "notification".into()),
-        ),
+        "Notification" => notification_state(input.notification_type.as_deref()),
         "PreCompact" => ("compacting", "compacting".into()),
         // Stop is explicitly NOT emitted for user interrupts. An interrupted
         // tool is a terminal event, unlike an ordinary tool failure. An agent
@@ -148,6 +145,28 @@ fn event_state(input: &HookInput) -> (&'static str, String) {
             ("active", input.tool_name.clone().unwrap_or_default())
         }
         _ => ("active", String::new()),
+    }
+}
+
+/// Claude Code 2.1.285 notification types. Only requests for the user's
+/// decision are a wait; `idle_prompt` means the finished turn sat unanswered.
+/// An empty state leaves the record untouched (informational notification).
+fn notification_state(kind: Option<&str>) -> (&'static str, String) {
+    match kind {
+        // Older versions send no type: their notifications asked for input.
+        None => ("waiting", "notification".into()),
+        Some(
+            kind @ ("permission_prompt"
+            | "worker_permission_prompt"
+            | "elicitation_dialog"
+            | "elicitation_url_dialog"
+            | "agent_needs_input"),
+        ) => ("waiting", kind.into()),
+        Some("idle_prompt") => ("idle", String::new()),
+        Some("auth_success") => ("active", "auth_success".into()),
+        // agent_completed, push_notification, quota_auto_resume_*,
+        // computer_use_*, model_refusal_fallback and future types.
+        Some(_) => ("", String::new()),
     }
 }
 
@@ -177,6 +196,23 @@ mod tests {
         assert_eq!(event_state(&hook("PreCompact")).0, "compacting");
         assert_eq!(event_state(&hook("PostCompact")).0, "active");
         assert_eq!(event_state(&hook("Stop")).0, "idle");
+    }
+
+    #[test]
+    fn only_requests_for_a_decision_are_waits() {
+        let notification = |kind: Option<&str>| {
+            let mut input = hook("Notification");
+            input.notification_type = kind.map(str::to_owned);
+            event_state(&input).0
+        };
+        assert_eq!(notification(Some("permission_prompt")), "waiting");
+        assert_eq!(notification(Some("elicitation_dialog")), "waiting");
+        assert_eq!(notification(Some("agent_needs_input")), "waiting");
+        assert_eq!(notification(None), "waiting");
+        assert_eq!(notification(Some("idle_prompt")), "idle");
+        assert_eq!(notification(Some("auth_success")), "active");
+        assert_eq!(notification(Some("agent_completed")), "");
+        assert_eq!(notification(Some("push_notification")), "");
     }
 
     #[test]

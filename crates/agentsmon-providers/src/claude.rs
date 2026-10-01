@@ -87,6 +87,11 @@ impl CStatusRecord {
         if self.event == "assistant" && self.state == "waiting" {
             return AgentState::Idle;
         }
+        // Helpers before 1 October 2026 stored Claude's idle reminder (sent a
+        // minute after a finished turn) as a wait for input.
+        if self.event == "Notification" && self.activity == "idle_prompt" {
+            return AgentState::Idle;
+        }
         match self.state.as_str() {
             "active" => AgentState::Active,
             "waiting" => AgentState::Waiting,
@@ -700,6 +705,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(record.state(), AgentState::Active);
+    }
+
+    #[test]
+    fn idle_reminder_recorded_as_a_wait_reads_as_idle() {
+        let record = |activity: &str| {
+            serde_json::from_str::<CStatusRecord>(&format!(
+                r#"{{"session_id":"s","pid":42,"state":"waiting","event":"Notification","activity":"{activity}","timestamp":"2026-09-30T21:33:35Z"}}"#
+            ))
+            .unwrap()
+            .state()
+        };
+        assert_eq!(record("idle_prompt"), AgentState::Idle);
+        assert_eq!(record("permission_prompt"), AgentState::Waiting);
     }
 
     #[test]

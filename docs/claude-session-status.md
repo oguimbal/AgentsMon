@@ -153,6 +153,16 @@ quand `SubagentStop` est arrivé, car le hook `Stop` avait écrit `active`
   registre `idle`/`shell` s’applique même s’il est plus ancien que ce hook. Un
   tour principal repris republie `busy`, qui reste soumis à la règle normale.
 
+Hook `Notification` : seuls `permission_prompt`, `worker_permission_prompt`,
+`elicitation_dialog`, `elicitation_url_dialog` et `agent_needs_input` (ou une
+notification sans type, anciennes versions) donnent Waiting. `idle_prompt`,
+envoyé une minute après un tour terminé resté sans réponse, donne Idle ; les
+records écrits avant le 1er octobre 2026 avec ce type sont aussi lus Idle.
+`auth_success` reste Active. Les autres types (`agent_completed`,
+`push_notification`, `quota_auto_resume_*`, `computer_use_*`,
+`model_refusal_fallback`, futurs types) ne changent pas l’état : ils sont
+fusionnés comme un heartbeat. Liste relevée dans le binaire 2.1.285.
+
 Limite connue : si un tel agent demande une autorisation après la fin du tour,
 la carte passe Waiting puis son `PostToolUse` suivant la remet Active.
 
