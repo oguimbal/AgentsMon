@@ -28,7 +28,7 @@ claude plugin validate .
 - `crates/local-source-ipc` is vendored identically in LeSwitcheur and defines the versioned contract, socket transport and golden v1 fixture; see its README. Neither repository requires a sibling checkout to build.
 - `agentsmon/src/local_source.rs` publishes visible store metadata after every broadcast. Custom session/group names, states and unread notifications stay authoritative in AgentsMon. Never export conversation content or native focus targets.
 - The macOS/Unix socket exists only while AgentsMon runs. Unsupported versions, malformed requests, expired commands and unavailable sessions fail safely. Windows currently exposes no local source transport.
-- IPC focus, session-card focus and notification focus share `focus_agent_result`; for IPC, clear unread state only after successful focus. A user click on a card or notification clears it even when the host cannot be focused (e.g. Warp). Do not add a separate activation implementation for IPC consumers.
+- IPC focus, session-card focus and notification focus share `focus_agent_result`; for IPC, clear unread state only after successful focus. A user click on a card or notification clears it even when the host cannot be focused (e.g. a Warp build without session URLs). Do not add a separate activation implementation for IPC consumers.
 
 ## Manual regression checks
 
@@ -43,4 +43,4 @@ claude plugin validate .
 - Context values 0, 1, 50, 99, 100 and unavailable render correctly.
 - Claude states transition through idle, active, waiting and compacting.
 - Plugin installation is automatic and idempotent; uninstall preserves settings edited after installation.
-- macOS focus works across common terminal/IDE hosts; Windows falls back to the host window.
+- macOS focus works across common terminal/IDE hosts and selects the exact Warp/iTerm2 tab (see `docs/terminal-focus.md` before adding a terminal); Windows falls back to the host window.

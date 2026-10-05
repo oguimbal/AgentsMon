@@ -71,7 +71,28 @@ fn focus_host(target: &FocusTarget) -> Result<()> {
             }
         }
     }
+    if let Some(uri) = warp_session_uri(target) {
+        if open_uri(&uri).is_ok() {
+            return Ok(());
+        }
+    }
     focus_pid(target.host_pid)
+}
+
+/// Warp focuses (and reveals) the tab owning a session through
+/// `warp://session/<uuid>`, the value it also exports as `WARP_FOCUS_URL`.
+fn warp_session_uri(target: &FocusTarget) -> Option<String> {
+    let is_warp = target
+        .host_app
+        .as_deref()
+        .is_some_and(|app| app.to_ascii_lowercase().contains("warp"));
+    let session_id = target.terminal_session_id.as_deref()?;
+    let valid = !session_id.is_empty()
+        && session_id.len() <= 64
+        && session_id
+            .chars()
+            .all(|character| character.is_ascii_hexdigit() || character == '-');
+    (is_warp && valid).then(|| format!("warp://session/{session_id}"))
 }
 
 #[cfg(target_os = "macos")]
@@ -115,6 +136,11 @@ end run
 
 #[cfg(not(target_os = "macos"))]
 fn focus_host(target: &FocusTarget) -> Result<()> {
+    if let Some(uri) = warp_session_uri(target) {
+        if open_uri(&uri).is_ok() {
+            return Ok(());
+        }
+    }
     focus_pid(target.host_pid)
 }
 
@@ -177,4 +203,43 @@ fn focus_pid(pid: i32) -> Result<()> {
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn focus_pid(_pid: i32) -> Result<()> {
     bail!("focusing is currently supported on macOS and Windows")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target(host_app: &str, session_id: &str) -> FocusTarget {
+        FocusTarget {
+            host_pid: 42,
+            host_app: Some(host_app.into()),
+            terminal_session_id: Some(session_id.into()),
+            ..FocusTarget::default()
+        }
+    }
+
+    #[test]
+    fn builds_warp_session_uri_only_for_warp_hosts() {
+        assert_eq!(
+            warp_session_uri(&target("WarpTerminal", "329033c914374d55949669c6e305b2c5"))
+                .as_deref(),
+            Some("warp://session/329033c914374d55949669c6e305b2c5")
+        );
+        assert_eq!(
+            warp_session_uri(&target(
+                "/Applications/Warp.app/Contents/MacOS/stable",
+                "329033c9-1437-4d55-9496-69c6e305b2c5"
+            ))
+            .as_deref(),
+            Some("warp://session/329033c9-1437-4d55-9496-69c6e305b2c5")
+        );
+        assert!(warp_session_uri(&target("iTerm2", "329033c914374d55949669c6e305b2c5")).is_none());
+        assert!(warp_session_uri(&target("WarpTerminal", "")).is_none());
+        assert!(warp_session_uri(&target("WarpTerminal", "x/../../evil")).is_none());
+        assert!(warp_session_uri(&FocusTarget {
+            host_app: Some("WarpTerminal".into()),
+            ..FocusTarget::default()
+        })
+        .is_none());
+    }
 }

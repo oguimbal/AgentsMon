@@ -964,7 +964,7 @@ fn provider_display_name(state: &AppState, provider_id: &str) -> String {
 
 /// A click on a card or a notification. The click itself acknowledges the
 /// session, so its unread mark goes even when the host cannot be focused
-/// (e.g. a Warp tab). IPC consumers keep the stricter `focus_agent_result`.
+/// (e.g. a Warp build without session URLs). IPC consumers keep the stricter `focus_agent_result`.
 fn focus_agent(id: &agentsmon_core::AgentId, state: &AppState, cx: &mut App) {
     if let Err(code) = focus_agent_result(id, state, cx) {
         tracing::warn!(code, session = %id.session_id, "focus failed");

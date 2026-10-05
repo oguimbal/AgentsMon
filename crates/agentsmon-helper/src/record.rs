@@ -222,12 +222,20 @@ pub(crate) struct EnvironmentMetadata {
 
 impl EnvironmentMetadata {
     pub(crate) fn current() -> Self {
-        let terminal_session_id = std::env::var("ITERM_SESSION_ID")
-            .ok()
-            .or_else(|| std::env::var("WT_SESSION").ok());
         let terminal_name = std::env::var("LC_TERMINAL")
             .ok()
             .or_else(|| std::env::var("TERM_PROGRAM").ok());
+        // Warp exports the tab's session UUID; only trust it while Warp is
+        // still the direct terminal (not tmux, nor an app launched from Warp).
+        let warp_session_id = terminal_name
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case("WarpTerminal"))
+            .then(|| std::env::var("WARP_TERMINAL_SESSION_UUID").ok())
+            .flatten();
+        let terminal_session_id = std::env::var("ITERM_SESSION_ID")
+            .ok()
+            .or_else(|| std::env::var("WT_SESSION").ok())
+            .or(warp_session_id);
         let host_app = if std::env::var_os("ITERM_SESSION_ID").is_some()
             || terminal_name
                 .as_deref()
