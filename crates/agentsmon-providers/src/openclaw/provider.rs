@@ -345,6 +345,7 @@ fn snapshot(provider: &str, base: &::url::Url, session: &Session) -> AgentSnapsh
     AgentSnapshot {
         id: AgentId::new(provider, session.key.clone()),
         pid: 0,
+        group_dir: None,
         project_name: session.agent_id.clone(),
         cwd,
         title: session.title.clone(),

@@ -273,6 +273,7 @@ impl AgentProvider for ClaudeProvider {
             snapshots.push(AgentSnapshot {
                 id: AgentId::new(self.id(), record.session_id),
                 pid: record.pid,
+                group_dir: None,
                 project_name: AgentSnapshot::project_name(&cwd),
                 title: record.title,
                 custom_name: None,

@@ -283,6 +283,7 @@ impl AgentProvider for CodexProvider {
             snapshots.push(AgentSnapshot {
                 id: AgentId::new(self.id(), &record.session_id),
                 pid: record.pid,
+                group_dir: None,
                 project_name: AgentSnapshot::project_name(&cwd),
                 title: record.title.clone(),
                 custom_name: None,

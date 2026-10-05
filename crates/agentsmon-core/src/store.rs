@@ -74,11 +74,11 @@ impl AgentStore {
             .collect()
     }
 
-    /// The card a session belongs to. Sessions group by working directory;
-    /// a manual assignment map consulted here first is all a drag-to-group
-    /// feature would need.
+    /// The card a session belongs to. Sessions group by working directory,
+    /// git worktrees under their main checkout; a manual assignment map
+    /// consulted here first is all a drag-to-group feature would need.
     pub fn group_key(snapshot: &AgentSnapshot) -> GroupKey {
-        GroupKey::Directory(snapshot.cwd.clone())
+        GroupKey::Directory(snapshot.group_dir.as_ref().unwrap_or(&snapshot.cwd).clone())
     }
 
     /// Visible sessions folded into bar cards.
@@ -245,6 +245,7 @@ mod tests {
             id: AgentId::new("claude", id),
             pid: 10,
             cwd: PathBuf::from(format!("/tmp/{id}")),
+            group_dir: None,
             project_name: id.into(),
             title: None,
             custom_name: None,

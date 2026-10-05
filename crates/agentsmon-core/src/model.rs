@@ -141,6 +141,10 @@ pub struct AgentSnapshot {
     pub id: AgentId,
     pub pid: i32,
     pub cwd: PathBuf,
+    /// Directory the session groups under when it differs from `cwd`: the
+    /// main checkout of a git worktree. Resolved by the application, not providers.
+    #[serde(default)]
+    pub group_dir: Option<PathBuf>,
     pub project_name: String,
     /// Conversation title chosen by the agent (or renamed by the user).
     /// Metadata only: never derived from message text by AgentsMon.
@@ -294,8 +298,12 @@ pub fn group_sessions(
                 slots[index] = match std::mem::replace(&mut slots[index], placeholder) {
                     Slot::Single(first) => Slot::Group(SessionGroup {
                         custom_name: group_name(&key),
+                        project_name: match &first.group_dir {
+                            // A worktree member first: name the group after its main checkout.
+                            Some(dir) => AgentSnapshot::project_name(dir),
+                            None => first.project_name.clone(),
+                        },
                         key,
-                        project_name: first.project_name.clone(),
                         members: vec![*first, agent],
                     }),
                     Slot::Group(mut group) => {
@@ -349,6 +357,7 @@ mod tests {
             id: AgentId::new("claude", id),
             pid: 1,
             cwd: cwd.into(),
+            group_dir: None,
             project_name: AgentSnapshot::project_name(Path::new(cwd)),
             title: None,
             custom_name: None,
@@ -390,6 +399,23 @@ mod tests {
         assert_eq!(slots[0].first_id().session_id, "a");
         assert!(matches!(&slots[1], Slot::Single(agent) if agent.id.session_id == "b"));
         assert_eq!(slots[1].label(), "y");
+    }
+
+    #[test]
+    fn worktree_sessions_join_their_main_checkout_group() {
+        let mut worktree = agent("w", "/repo/edf/.claude/worktrees/edf-oct");
+        worktree.group_dir = Some("/repo/edf".into());
+        let slots = group_sessions(
+            vec![worktree, agent("m", "/repo/edf")],
+            crate::AgentStore::group_key,
+            |_| None,
+        );
+        let [Slot::Group(group)] = slots.as_slice() else {
+            panic!("worktree and main checkout should share one card");
+        };
+        assert_eq!(group.label(), "edf");
+        assert_eq!(group.key, GroupKey::Directory("/repo/edf".into()));
+        assert_eq!(group.common_cwd(), None);
     }
 
     #[test]

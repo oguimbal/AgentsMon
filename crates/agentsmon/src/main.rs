@@ -43,6 +43,7 @@ const CHANGE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 mod connection_diagnostics;
 mod custom_names;
+mod git_worktree;
 mod hidden_sessions;
 mod local_source;
 mod notification;
@@ -77,6 +78,7 @@ struct GroupMenu {
 struct AppStateInner {
     local_source: local_source::LocalSource,
     store: RefCell<AgentStore>,
+    worktrees: RefCell<git_worktree::WorktreeResolver>,
     provider_statuses: RefCell<Vec<ProviderStatus>>,
     providers: Vec<Arc<dyn AgentProvider>>,
     /// Also in `providers`; kept typed for its connect flow.
@@ -134,6 +136,7 @@ fn main() {
         let state = AppState(Rc::new(AppStateInner {
             local_source: local_source::LocalSource::new(),
             store: RefCell::new(store),
+            worktrees: RefCell::default(),
             provider_statuses: RefCell::new(Vec::new()),
             providers,
             openclaw,
@@ -304,6 +307,7 @@ fn refresh(state: &AppState, cx: &mut App) {
         }
     }
     snapshots.sort_by_key(|snapshot| snapshot.last_activity);
+    state.0.worktrees.borrow_mut().resolve(&mut snapshots);
     let previous: HashMap<_, _> = state
         .0
         .store

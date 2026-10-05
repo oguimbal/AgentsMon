@@ -220,6 +220,7 @@ mod tests {
             id: AgentId::new("claude", id),
             pid: 1,
             cwd: "/repo/api".into(),
+            group_dir: None,
             project_name: "api".into(),
             title: Some("Agent title".into()),
             custom_name: None,

@@ -1689,6 +1689,7 @@ mod tests {
             id: AgentId::new("claude", id),
             pid: 1,
             cwd: format!("/tmp/{id}").into(),
+            group_dir: None,
             project_name: id.into(),
             title: None,
             custom_name: None,
@@ -1710,6 +1711,7 @@ mod tests {
         let mut snapshot = AgentSnapshot {
             id: AgentId::new("claude", "s"),
             pid: 1,
+            group_dir: None,
             cwd: "/tmp/very-long-project".into(),
             project_name: "x".repeat(100),
             title: None,
