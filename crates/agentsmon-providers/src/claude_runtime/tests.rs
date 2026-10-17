@@ -21,6 +21,7 @@ fn read(
             state,
             time: millis(hook_ms).unwrap(),
             subagent: false,
+            wakeup: false,
         },
         millis(30000).unwrap(),
     )
@@ -65,6 +66,11 @@ fn explicit_wait_compaction_and_shell_states() {
         ("busy", AgentState::Compacting, AgentState::Compacting),
         ("idle", AgentState::Compacting, AgentState::Idle),
         ("shell", AgentState::Active, AgentState::Idle),
+        ("shell", AgentState::Awaiting, AgentState::Awaiting),
+        // The awaited monitor is gone (stopped from the task list).
+        ("idle", AgentState::Awaiting, AgentState::Idle),
+        ("busy", AgentState::Awaiting, AgentState::Active),
+        ("waiting", AgentState::Awaiting, AgentState::Waiting),
         // Last on purpose: the silent-tool check below reuses this file.
         ("busy", AgentState::Idle, AgentState::Active),
     ] {
@@ -82,6 +88,7 @@ fn explicit_wait_compaction_and_shell_states() {
                     state: AgentState::Active,
                     time: millis(12000).unwrap(),
                     subagent: false,
+                    wakeup: false,
                 },
                 millis(86_400_000).unwrap()
             )
@@ -207,6 +214,7 @@ fn late_subagent_hook_does_not_revive_an_idle_turn() {
                     state: AgentState::Active,
                     time: millis(15000).unwrap(),
                     subagent: subagent_hook,
+                    wakeup: false,
                 },
                 millis(30000).unwrap(),
             )
@@ -221,4 +229,33 @@ fn late_subagent_hook_does_not_revive_an_idle_turn() {
     // An ordinary newer hook still wins, and so does a subagent of a busy turn.
     assert_eq!(read("idle", false), None);
     assert_eq!(read("busy", true), None);
+}
+
+#[test]
+fn a_scheduled_wakeup_survives_the_idle_registry() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = Registry::new(dir.path().into());
+    let read = |status: &str, wakeup: bool| {
+        fs::write(dir.path().join("42.json"), fixture(status, 20000)).unwrap();
+        registry
+            .read(
+                PID,
+                "s",
+                millis(9000).unwrap(),
+                LastHook {
+                    state: AgentState::Awaiting,
+                    time: millis(12000).unwrap(),
+                    subagent: false,
+                    wakeup,
+                },
+                millis(30000).unwrap(),
+            )
+            .unwrap()
+            .map(|(state, _)| state)
+    };
+    // The turn-end idle is published after the Stop hook.
+    assert_eq!(read("idle", true), Some(AgentState::Awaiting));
+    assert_eq!(read("shell", true), Some(AgentState::Awaiting));
+    assert_eq!(read("busy", true), Some(AgentState::Active));
+    assert_eq!(read("idle", false), Some(AgentState::Idle));
 }

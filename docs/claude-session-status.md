@@ -73,7 +73,7 @@ connecte pas au socket de messagerie entre agents.
 | `status` | État AgentsMon |
 | --- | --- |
 | `busy` | Active, vert ; conserve Compacting si le hook courant l’indique |
-| `shell` | Idle, gris : tour terminé, shell lancé en arrière-plan encore vivant |
+| `shell` | Idle, gris : tour terminé, shell lancé en arrière-plan encore vivant ; Awaiting si le dernier hook attend un monitor (voir plus bas) |
 | `waiting` | Waiting, orange |
 | `idle` | Idle, gris |
 | valeur inconnue | Repli sur les hooks, diagnostic après persistance |
@@ -93,6 +93,58 @@ modèle.
 Le registre est une interface interne, sans contrat public de stabilité ni
 numéro de version de schéma. `peerProtocol` décrit une autre interface et ne
 permet pas de versionner ce fichier.
+
+## Attente d’un monitor ou d’un réveil (Awaiting)
+
+Ajouté le 17 octobre 2026 (CLI 2.1.302). Une session dont le tour est terminé
+mais qui a armé de quoi se relancer est affichée **Awaiting** : vert-bleu
+(`0x2a9d8f`) avec un chronomètre sur l’indicateur de contexte. Ce n’est **pas**
+le cas d’un simple shell en arrière-plan.
+
+Constat : le hook `Stop` liste `background_tasks` (`id`, `type`, `status`,
+`description`, `command`) et `session_crons` (`id`, `schedule`, `recurring`,
+`prompt`). Dans 2.1.302, `type` vaut `shell` pour toute tâche `local_bash`, y
+compris celles de l’outil Monitor (`kind: "monitor"` en interne n’est pas
+exporté). Seuls les monitors MCP/WebSocket sortent en `monitor`. Le registre
+publie `shell` dès qu’un `local_bash` vit, monitor compris. Un dev server et un
+Monitor sont donc indiscernables par leur type, et un `Bash` lancé avec
+`run_in_background` notifie l’agent à sa fin exactement comme un dev server :
+attendre un build lancé ainsi **n’est pas détectable** sans lire la
+conversation, et reste gris.
+
+Règle appliquée par le helper :
+
+1. `PostToolUse` de l’outil `Monitor` sans `agent_id` : seconde lecture du hook
+   limitée à `tool_response.taskId` et `persistent`. Un monitor non persistant
+   ajoute son id (opaque) à `monitor_task_ids` du record (16 au plus).
+   Les monitors persistants (surveillance de logs sans fin) sont ignorés.
+2. `Stop` : seuls les `id` des tâches et `recurring` des crons sont décodés.
+   Les ids de monitors absents de `background_tasks` sont oubliés. Si le tour
+   devait passer Idle et qu’un cron ponctuel (`recurring: false` :
+   `ScheduleWakeup`, rappel unique de `CronCreate`) existe, l’état est
+   `awaiting` / activité `wakeup` ; sinon, si un monitor retenu tourne encore,
+   `awaiting` / `monitor`. Les crons récurrents (`/loop 5m`…) restent gris.
+3. Le rappel `idle_prompt` et les hooks de sous-agents sont fusionnés comme des
+   heartbeats sur un record Awaiting.
+
+Côté provider, un registre plus récent `shell` conserve Awaiting ; `idle`
+le conserve seulement pour un réveil (aucun processus : le registre publie
+`idle` en fin de tour ; son ordre par rapport au hook `Stop` n’a pas été
+mesuré, les deux cas sont couverts), et le termine pour un monitor (tâche
+arrêtée sans relancer le tour). `busy` et `waiting` l’emportent normalement.
+
+Vérifié en réel le 17 octobre 2026 avec un hook temporaire ne journalisant que
+les ids/types : `PostToolUse` Monitor → `{"taskId":"bfxllzues","timeoutMs":120000,"persistent":false}`,
+puis `Stop` → `background_tasks: [{"id":"bfxllzues","type":"shell","status":"running"}]`.
+
+Le passage Active → Awaiting ne déclenche pas la notification de fin de tour ;
+Awaiting → Idle/Waiting la déclenche. Le protocole local v1 n’a pas cet état :
+il est exporté `active`.
+
+Limites : un rappel `CronCreate` unique lointain (demain 15 h) laisse la carte
+Awaiting jusque-là ; un cron supprimé depuis l’interface, sans outil ni hook,
+la laisse Awaiting jusqu’au prompt suivant. Un monitor WebSocket/MCP n’est pas un `local_bash`, le registre
+publie alors `idle` et la carte repasse grise.
 
 ## Ordre des événements et protections
 
@@ -146,7 +198,8 @@ quand `SubagentStop` est arrivé, car le hook `Stop` avait écrit `active`
 
 - `Stop` ne reste Active que si `background_tasks` contient du travail
   d’agent (`subagent`, `workflow`, `teammate`, `cloud session`). Des `shell`,
-  `monitor`, `MCP task`, `dream` ou `auto-mode scan` seuls donnent Idle. Seul
+  `monitor`, `MCP task`, `dream` ou `auto-mode scan` seuls donnent Idle
+  (ou Awaiting pour un monitor ou un réveil, voir la section dédiée). Seul
   le champ `type` de chaque tâche est décodé ; `command` et `description`
   contiennent du texte et ne sont pas lus.
 - Côté provider, quand le dernier hook est `SubagentStart`/`SubagentStop`, un

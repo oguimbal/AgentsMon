@@ -106,6 +106,9 @@ fn export_entries(
                     AgentState::Waiting => SessionState::Waiting,
                     AgentState::Idle => SessionState::Idle,
                     AgentState::Compacting => SessionState::Compacting,
+                    // Protocol v1 has no such state; the agent is still at
+                    // work from the consumer's point of view.
+                    AgentState::Awaiting => SessionState::Active,
                 },
                 unread: unread.contains(&agent.id),
                 context_percent: agent

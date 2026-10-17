@@ -96,6 +96,7 @@ impl CStatusRecord {
             "active" => AgentState::Active,
             "waiting" => AgentState::Waiting,
             "compacting" => AgentState::Compacting,
+            "awaiting" => AgentState::Awaiting,
             _ => AgentState::Idle,
         }
     }
@@ -251,6 +252,7 @@ impl AgentProvider for ClaudeProvider {
                     state,
                     time: hook_time,
                     subagent: matches!(record.event.as_str(), "SubagentStart" | "SubagentStop"),
+                    wakeup: record.activity == "wakeup",
                 },
                 SystemTime::now(),
             ) {

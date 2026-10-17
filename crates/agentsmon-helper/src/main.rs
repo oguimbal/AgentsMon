@@ -27,20 +27,50 @@ struct HookInput {
     agent_id: Option<String>,
     #[serde(default)]
     background_tasks: Vec<BackgroundTask>,
+    #[serde(default)]
+    session_crons: Vec<SessionCron>,
 }
 
-/// One running background task listed by the Stop hook. Only its public type
-/// is decoded: `command` and `description` carry conversation text.
+/// One running background task listed by the Stop hook. Only its opaque id
+/// and public type are decoded: `command` and `description` carry
+/// conversation text. Claude Code 2.1.302 labels every `local_bash` task
+/// `shell`, Monitor tool watches included; only the id tells them apart.
 #[derive(Debug, Deserialize)]
 struct BackgroundTask {
+    #[serde(default)]
+    id: String,
     #[serde(rename = "type", default)]
     kind: String,
 }
 
+/// Session cron listed by the Stop hook (CronCreate, ScheduleWakeup, /loop).
+/// `prompt` is conversation text and is not decoded.
+#[derive(Debug, Deserialize)]
+struct SessionCron {
+    #[serde(default)]
+    recurring: bool,
+}
+
+/// `PostToolUse` of the Monitor tool, decoded in a second pass only for that
+/// tool: other tools' responses carry conversation content.
+#[derive(Debug, Deserialize)]
+struct MonitorHook {
+    tool_response: MonitorResponse,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MonitorResponse {
+    task_id: String,
+    #[serde(default)]
+    persistent: bool,
+}
+
 impl BackgroundTask {
     /// Agent work that continues after the turn and resumes the session.
-    /// Shells (dev servers…), monitors, MCP tasks and internal housekeeping
-    /// (`dream`, `auto-mode scan`) run without the model waiting on them.
+    /// Shells (dev servers…), MCP tasks and internal housekeeping (`dream`,
+    /// `auto-mode scan`) run without the model waiting on them. Monitor tool
+    /// watches are recognised by id instead (see `record::StopTasks`).
     fn is_agent_work(&self) -> bool {
         matches!(
             self.kind.as_str(),
@@ -82,6 +112,8 @@ fn process_hook(input: &[u8]) -> Result<()> {
     }
 
     let (state, activity) = event_state(&hook);
+    let started_monitor = started_monitor(&hook, input);
+    let stop_tasks = stop_tasks(&hook);
     // Informational hooks only refresh the record, like a status-line beat.
     let event = if state.is_empty() {
         ""
@@ -109,8 +141,39 @@ fn process_hook(input: &[u8]) -> Result<()> {
             // extraction...) after the main turn ended; their hooks carry an
             // agent_id and must not turn an idle or waiting session green.
             subagent: hook.agent_id.is_some(),
+            started_monitor,
+            stop_tasks,
         },
     )
+}
+
+/// Task id of a bounded watch armed by the main agent with the Monitor tool.
+/// Persistent monitors (log tails…) watch indefinitely without the agent
+/// waiting on an outcome; a subagent's monitor does not resume the session.
+fn started_monitor(hook: &HookInput, input: &[u8]) -> Option<String> {
+    if hook.hook_event_name != "PostToolUse"
+        || hook.tool_name.as_deref() != Some("Monitor")
+        || hook.agent_id.is_some()
+    {
+        return None;
+    }
+    let monitor: MonitorHook = serde_json::from_slice(input).ok()?;
+    (!monitor.tool_response.persistent && !monitor.tool_response.task_id.is_empty())
+        .then_some(monitor.tool_response.task_id)
+}
+
+/// What the ending turn left armed, for a Stop that would otherwise rest.
+fn stop_tasks(hook: &HookInput) -> Option<record::StopTasks> {
+    (hook.hook_event_name == "Stop").then(|| record::StopTasks {
+        running: hook
+            .background_tasks
+            .iter()
+            .map(|task| task.id.clone())
+            .collect(),
+        // One-shot crons: ScheduleWakeup and one-time CronCreate reminders.
+        // Recurring crons (/loop 5m…) can stay armed for days.
+        wakeup: hook.session_crons.iter().any(|cron| !cron.recurring),
+    })
 }
 
 fn event_state(input: &HookInput) -> (&'static str, String) {
@@ -185,6 +248,7 @@ mod tests {
             is_interrupt: false,
             agent_id: None,
             background_tasks: vec![],
+            session_crons: vec![],
         }
     }
 
@@ -239,6 +303,69 @@ mod tests {
             "active"
         );
         assert_eq!(stop(r#"[{"id":"x"}]"#), "idle");
+    }
+
+    #[test]
+    fn records_only_bounded_monitors_of_the_main_agent() {
+        let started = |json: &str| {
+            let input: HookInput = serde_json::from_str(json).unwrap();
+            started_monitor(&input, json.as_bytes())
+        };
+        let monitor = |response: &str, agent: &str| {
+            format!(
+                r#"{{"session_id":"s","transcript_path":"/t/s.jsonl","hook_event_name":"PostToolUse","tool_name":"Monitor"{agent},"tool_input":{{"command":"x"}},"tool_response":{response}}}"#
+            )
+        };
+        assert_eq!(
+            started(&monitor(
+                r#"{"taskId":"bfxllzues","timeoutMs":120000,"persistent":false}"#,
+                ""
+            ))
+            .as_deref(),
+            Some("bfxllzues")
+        );
+        assert_eq!(
+            started(&monitor(
+                r#"{"taskId":"b1","timeoutMs":0,"persistent":true}"#,
+                ""
+            )),
+            None
+        );
+        assert_eq!(
+            started(&monitor(r#"{"taskId":"b1"}"#, r#","agent_id":"child""#)),
+            None
+        );
+        assert_eq!(started(&monitor(r#""unexpected""#, "")), None);
+        assert_eq!(
+            started(
+                r#"{"session_id":"s","transcript_path":"/t/s.jsonl","hook_event_name":"PostToolUse","tool_name":"Bash","tool_response":{"stdout":"x"}}"#
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn stop_lists_running_task_ids_and_one_shot_wakeups() {
+        let tasks = |json: &str| {
+            let input: HookInput = serde_json::from_str(&format!(
+                r#"{{"session_id":"s","transcript_path":"/t/s.jsonl","hook_event_name":"Stop",{json}}}"#
+            ))
+            .unwrap();
+            stop_tasks(&input).map(|tasks| (tasks.running, tasks.wakeup))
+        };
+        assert_eq!(
+            tasks(
+                r#""background_tasks":[{"id":"b1","type":"shell","status":"running","command":"x"}],"session_crons":[{"id":"c1","schedule":"* * * * *","recurring":true,"prompt":"x"}]"#
+            ),
+            Some((vec!["b1".to_owned()], false))
+        );
+        assert_eq!(
+            tasks(
+                r#""session_crons":[{"id":"c1","schedule":"5 12 * * *","recurring":false,"prompt":"x"}]"#
+            ),
+            Some((vec![], true))
+        );
+        assert_eq!(stop_tasks(&hook("SubagentStop")).map(|t| t.wakeup), None);
     }
 
     #[test]

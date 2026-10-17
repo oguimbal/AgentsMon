@@ -319,8 +319,14 @@ fn refresh(state: &AppState, cx: &mut App) {
     let completed: Vec<_> = snapshots
         .iter()
         .filter(|snapshot| {
-            previous.get(&snapshot.id) == Some(&agentsmon_core::AgentState::Active)
-                && snapshot.state != agentsmon_core::AgentState::Active
+            // Awaiting a monitor or a wakeup is not a completed turn yet.
+            let working = |state: &agentsmon_core::AgentState| {
+                matches!(
+                    state,
+                    agentsmon_core::AgentState::Active | agentsmon_core::AgentState::Awaiting
+                )
+            };
+            previous.get(&snapshot.id).is_some_and(working) && !working(&snapshot.state)
         })
         .map(|snapshot| snapshot.id.clone())
         .collect();

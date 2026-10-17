@@ -40,7 +40,14 @@ struct StatusRecord {
     /// The last lifecycle hook came from a subagent (it carried an agent_id).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     subagent: bool,
+    /// Opaque ids of bounded Monitor tool watches the main agent armed and
+    /// that were still running at the last Stop.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    monitor_task_ids: Vec<String>,
 }
+
+/// Monitor ids kept per record; older ones are dropped first.
+const MAX_MONITORS: usize = 16;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClaudeRateLimits {
@@ -71,6 +78,19 @@ pub struct RecordUpdate<'a> {
     /// The hook carries an agent_id. Subagent activity cannot wake a session
     /// whose main turn has ended or waits for the user.
     pub subagent: bool,
+    /// PostToolUse of the Monitor tool: id of the bounded watch it armed.
+    pub started_monitor: Option<String>,
+    /// Stop hook: what the ended turn left armed.
+    pub stop_tasks: Option<StopTasks>,
+}
+
+/// Background work listed by Stop. Claude Code labels Monitor watches
+/// `shell` like any background Bash (dev server…), so a resting turn only
+/// awaits when a task id matches a monitor recorded at its PostToolUse.
+pub struct StopTasks {
+    pub running: Vec<String>,
+    /// A one-shot session cron (ScheduleWakeup…) will resume the session.
+    pub wakeup: bool,
 }
 
 pub fn path_from_transcript(transcript: &str, session_id: &str) -> Result<PathBuf> {
@@ -98,14 +118,41 @@ pub fn merge_record(path: &Path, mut update: RecordUpdate<'_>) -> Result<()> {
     // Background and internal forked agents keep running after the main turn
     // ended or while it waits for an answer. A wait raised by a subagent
     // itself (its permission prompt) still ends when that subagent resumes.
-    let resting = previous
-        .as_ref()
-        .is_some_and(|r| r.state == "idle" || (r.state == "waiting" && !r.subagent));
-    if update.subagent && update.state == "active" && resting {
+    let resting = previous.as_ref().is_some_and(|r| {
+        r.state == "idle" || r.state == "awaiting" || (r.state == "waiting" && !r.subagent)
+    });
+    let awaiting = previous.as_ref().is_some_and(|r| r.state == "awaiting");
+    // Claude's idle reminder, a minute after the turn ended, does not end
+    // the wait for a monitor or a scheduled wakeup.
+    let idle_reminder = update.event == "Notification" && update.state == "idle";
+    if (update.subagent && update.state == "active" && resting) || (awaiting && idle_reminder) {
         // Merge like a heartbeat so a newer registry status still wins.
         update.state = "";
         update.event = "";
         update.activity.clear();
+    }
+    let mut monitor_task_ids = previous
+        .as_ref()
+        .map(|r| r.monitor_task_ids.clone())
+        .unwrap_or_default();
+    if let Some(id) = update.started_monitor.take() {
+        if !monitor_task_ids.contains(&id) {
+            monitor_task_ids.push(id);
+        }
+        let excess = monitor_task_ids.len().saturating_sub(MAX_MONITORS);
+        monitor_task_ids.drain(..excess);
+    }
+    if let Some(tasks) = update.stop_tasks.take() {
+        monitor_task_ids.retain(|id| tasks.running.contains(id));
+        if update.state == "idle" {
+            if tasks.wakeup {
+                update.state = "awaiting";
+                update.activity = "wakeup".into();
+            } else if !monitor_task_ids.is_empty() {
+                update.state = "awaiting";
+                update.activity = "monitor".into();
+            }
+        }
     }
     let environment = EnvironmentMetadata::current();
     let now = Utc::now().to_rfc3339();
@@ -189,6 +236,7 @@ pub fn merge_record(path: &Path, mut update: RecordUpdate<'_>) -> Result<()> {
         } else {
             update.subagent
         },
+        monitor_task_ids,
     };
 
     let temp = path.with_extension(format!("cstatus.tmp.{}", std::process::id()));
@@ -378,6 +426,8 @@ mod tests {
             rate_limits: None,
             title: None,
             subagent: false,
+            started_monitor: None,
+            stop_tasks: None,
         }
     }
 
@@ -521,6 +571,90 @@ mod tests {
         assert_eq!(after.state, "waiting");
         assert_eq!(after.event, "PermissionRequest");
         assert!(!after.subagent);
+    }
+
+    #[test]
+    fn a_turn_ended_on_a_running_monitor_awaits_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.cstatus");
+        let read = || serde_json::from_slice::<StatusRecord>(&fs::read(&path).unwrap()).unwrap();
+        let stop = |running: &[&str], wakeup| RecordUpdate {
+            state: "idle",
+            event: "Stop",
+            activity: String::new(),
+            stop_tasks: Some(StopTasks {
+                running: running.iter().map(|id| id.to_string()).collect(),
+                wakeup,
+            }),
+            ..update(None)
+        };
+        merge_record(
+            &path,
+            RecordUpdate {
+                event: "PostToolUse",
+                started_monitor: Some("bmonitor1".into()),
+                ..update(None)
+            },
+        )
+        .unwrap();
+
+        // A dev server alone is not awaited, the monitor is.
+        merge_record(&path, stop(&["bserver01"], false)).unwrap();
+        assert_eq!(read().state, "idle");
+        assert!(read().monitor_task_ids.is_empty());
+        merge_record(
+            &path,
+            RecordUpdate {
+                event: "PostToolUse",
+                started_monitor: Some("bmonitor2".into()),
+                ..update(None)
+            },
+        )
+        .unwrap();
+        merge_record(&path, stop(&["bserver01", "bmonitor2"], false)).unwrap();
+        let after = read();
+        assert_eq!(
+            (after.state.as_str(), after.activity.as_str()),
+            ("awaiting", "monitor")
+        );
+        assert_eq!(after.monitor_task_ids, ["bmonitor2"]);
+
+        // Claude's idle reminder and internal subagents keep the wait.
+        merge_record(
+            &path,
+            RecordUpdate {
+                state: "idle",
+                event: "Notification",
+                activity: String::new(),
+                ..update(None)
+            },
+        )
+        .unwrap();
+        merge_record(
+            &path,
+            RecordUpdate {
+                event: "SubagentStop",
+                subagent: true,
+                ..update(None)
+            },
+        )
+        .unwrap();
+        assert_eq!(read().state, "awaiting");
+        assert_eq!(read().event, "Stop");
+
+        // The monitor's event resumes the turn; its end leaves nothing armed.
+        merge_record(&path, update(None)).unwrap();
+        assert_eq!(read().state, "active");
+        merge_record(&path, stop(&["bserver01"], false)).unwrap();
+        assert_eq!(read().state, "idle");
+
+        // A one-shot wakeup (ScheduleWakeup) is awaited too.
+        merge_record(&path, stop(&[], true)).unwrap();
+        let after = read();
+        assert_eq!(
+            (after.state.as_str(), after.activity.as_str()),
+            ("awaiting", "wakeup")
+        );
     }
 
     #[test]

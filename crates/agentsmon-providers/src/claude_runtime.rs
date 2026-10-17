@@ -41,6 +41,9 @@ pub struct LastHook {
     /// SubagentStart/SubagentStop: may come from a background or internal
     /// forked agent after the main turn ended.
     pub subagent: bool,
+    /// Awaiting a one-shot session cron (ScheduleWakeup…) rather than a
+    /// monitor. Such a wait involves no process, so the registry says `idle`.
+    pub wakeup: bool,
 }
 
 #[derive(Default)]
@@ -163,6 +166,10 @@ impl Registry {
             return Err(diagnostic);
         };
         let state = match status {
+            // A Monitor tool watch is a `local_bash` task: the registry says
+            // `shell` while the turn rests on it, `idle` once it has gone.
+            "shell" if hook.state == AgentState::Awaiting => AgentState::Awaiting,
+            "idle" if hook.state == AgentState::Awaiting && hook.wakeup => AgentState::Awaiting,
             // `shell`: the turn is over but a background `local_bash` task
             // (e.g. a dev server) still runs. The model is not working on it.
             "idle" | "shell" => AgentState::Idle,

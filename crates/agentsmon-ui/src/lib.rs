@@ -245,6 +245,7 @@ impl MonitorView {
         let rename_target = RenameTarget::Session(Box::new(agent.clone()));
         let is_unread = self.unread.contains(&id);
         let state_background = state_color(agent.state);
+        let is_awaiting = agent.state == AgentState::Awaiting;
 
         let card = div()
             .id(SharedString::from(format!(
@@ -292,7 +293,9 @@ impl MonitorView {
                 div()
                     .id(SharedString::from(format!("context-{}", id.session_id)))
                     .size(px(CONTEXT_INDICATOR_SIZE))
-                    .child(context_pie(context, accent)),
+                    .relative()
+                    .child(context_pie(context, accent))
+                    .when(is_awaiting, |indicator| indicator.child(stopwatch_badge())),
             )
             .child(card_label(label, in_menu))
             .child(close_button(
@@ -540,6 +543,26 @@ fn unread_badge() -> impl IntoElement {
         .bg(rgb(0xf2b84b))
 }
 
+/// Stopwatch over the context indicator's lower right corner: the session
+/// waits for a monitor or a scheduled wakeup to resume it.
+fn stopwatch_badge() -> impl IntoElement {
+    div()
+        .absolute()
+        .right(px(-2.0))
+        .bottom(px(-2.0))
+        .size(px(8.0))
+        .child(canvas(
+            |_, _, _| {},
+            |bounds, _, window, _| {
+                let center = point(
+                    bounds.origin.x + bounds.size.width / 2.0,
+                    bounds.origin.y + bounds.size.height / 2.0 + px(0.4),
+                );
+                draw_stopwatch(window, center);
+            },
+        ))
+}
+
 /// Card text. In the menu the label stretches over the row so the close
 /// button of every member lines up on the right edge.
 fn card_label(label: String, in_menu: bool) -> impl IntoElement {
@@ -690,6 +713,7 @@ fn state_color(state: AgentState) -> Hsla {
         AgentState::Waiting => rgb(0xf0a33a).into(),
         AgentState::Idle => rgba(0x25262bf2).into(),
         AgentState::Compacting => rgb(0x4f8df7).into(),
+        AgentState::Awaiting => rgb(0x2a9d8f).into(),
     }
 }
 
@@ -915,6 +939,31 @@ fn draw_lock_badge(window: &mut Window, center: gpui::Point<gpui::Pixels>) {
     builder.line_to(point(center.x - half_width, top));
     if let Ok(path) = builder.build() {
         window.paint_path(path, lock_color);
+    }
+}
+
+/// White stopwatch (dial, crown, hand) on a dark disc.
+fn draw_stopwatch(window: &mut Window, center: gpui::Point<gpui::Pixels>) {
+    draw_filled_circle(window, center, px(3.6), rgb(0x1e1f24).into());
+    let color: Hsla = rgb(0xe8e8ea).into();
+    draw_circle(window, center, px(2.5), px(0.8), color);
+
+    let top = center.y - px(3.9);
+    let mut builder = PathBuilder::fill();
+    builder.move_to(point(center.x - px(0.9), top));
+    builder.line_to(point(center.x + px(0.9), top));
+    builder.line_to(point(center.x + px(0.9), top + px(0.9)));
+    builder.line_to(point(center.x - px(0.9), top + px(0.9)));
+    builder.line_to(point(center.x - px(0.9), top));
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, color);
+    }
+
+    let mut builder = PathBuilder::stroke(px(0.7));
+    builder.move_to(center);
+    builder.line_to(point(center.x + px(1.1), center.y - px(1.1)));
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, color);
     }
 }
 
@@ -1201,6 +1250,7 @@ fn state_label(state: AgentState) -> &'static str {
         AgentState::Waiting => "En attente d’une action",
         AgentState::Idle => "Au repos",
         AgentState::Compacting => "Compaction",
+        AgentState::Awaiting => "En attente d’une tâche de fond",
     }
 }
 

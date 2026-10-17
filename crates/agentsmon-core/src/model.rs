@@ -25,6 +25,9 @@ pub enum AgentState {
     Waiting,
     Idle,
     Compacting,
+    /// Turn ended, but the agent armed something that will resume it (a
+    /// monitor, a scheduled wakeup). A background shell alone is not this.
+    Awaiting,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
