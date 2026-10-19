@@ -89,6 +89,8 @@ pub enum MonitorEvent {
         target: Box<RenameTarget>,
         anchor_x: f32,
     },
+    /// Left click on a provider icon: hide or show all its sessions.
+    ToggleProvider(String),
     /// Right click on the provider icons: open the provider actions menu.
     ProvidersMenu {
         anchor_x: f32,
@@ -159,8 +161,12 @@ impl MonitorView {
     ) -> impl IntoElement {
         let details = provider.clone();
         let usage = provider.usage.clone();
+        let toggle_id = provider.id.clone();
+        let sessions_hidden = provider.sessions_hidden;
         div()
             .id(SharedString::from(format!("provider-{}", provider.id)))
+            .relative()
+            .cursor_pointer()
             .flex()
             .items_center()
             .justify_center()
@@ -179,7 +185,15 @@ impl MonitorView {
                     cx.emit(MonitorEvent::HideDetails);
                 }
             }))
-            .child(provider_ring(provider.icon_png, usage))
+            .on_click(cx.listener(move |_, _, _, cx| {
+                cx.emit(MonitorEvent::ToggleProvider(toggle_id.clone()));
+            }))
+            .child(
+                div()
+                    .when(sessions_hidden, |ring| ring.opacity(0.35))
+                    .child(provider_ring(provider.icon_png, usage)),
+            )
+            .when(sessions_hidden, |icon| icon.child(hidden_slash()))
     }
 
     fn render_slot(&self, slot: Slot, cx: &mut Context<Self>) -> AnyElement {
@@ -541,6 +555,31 @@ fn unread_badge() -> impl IntoElement {
         .size(px(5.0))
         .rounded_full()
         .bg(rgb(0xf2b84b))
+}
+
+/// Diagonal stroke over a provider icon whose sessions are toggled off.
+fn hidden_slash() -> impl IntoElement {
+    div().absolute().inset_0().child(
+        canvas(
+            |_, _, _| {},
+            |bounds, _, window, _| {
+                let inset = px(3.0);
+                let mut builder = PathBuilder::stroke(px(1.3));
+                builder.move_to(point(
+                    bounds.origin.x + inset,
+                    bounds.origin.y + bounds.size.height - inset,
+                ));
+                builder.line_to(point(
+                    bounds.origin.x + bounds.size.width - inset,
+                    bounds.origin.y + inset,
+                ));
+                if let Ok(path) = builder.build() {
+                    window.paint_path(path, rgb(0xe8e8ea));
+                }
+            },
+        )
+        .size_full(),
+    )
 }
 
 /// Stopwatch over the context indicator's lower right corner: the session
@@ -1077,6 +1116,14 @@ impl Render for ProviderDetailsView {
         } else {
             rows.push(("Quota".into(), "Indisponible".into()));
         }
+        rows.push((
+            "Sessions".into(),
+            if provider.sessions_hidden {
+                "masquées · clic pour afficher".into()
+            } else {
+                "clic pour masquer".into()
+            },
+        ));
         div()
             .flex()
             .flex_col()
@@ -1200,8 +1247,8 @@ pub fn agent_details_height(agent: &AgentSnapshot) -> f32 {
 /// Height of the provider details popup for the same layout.
 pub fn provider_details_height(provider: &ProviderStatus) -> f32 {
     // Provider name and the "Utilisation du provider" line, then one row per
-    // quota window (or the placeholder row).
-    let lines = 2 + match &provider.usage {
+    // quota window (or the placeholder row), then the sessions toggle hint.
+    let lines = 3 + match &provider.usage {
         Some(usage) => {
             usage.limits.len() + usize::from(usage.plan.is_some()) + usize::from(usage.stale)
         }

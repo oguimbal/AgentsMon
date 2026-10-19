@@ -95,6 +95,9 @@ pub struct ProviderStatus {
     /// Brand colour (0xRRGGBB) used to tag this provider's sessions in the bar.
     #[serde(default)]
     pub accent_rgb: Option<u32>,
+    /// The user toggled this provider's sessions off from its bar icon.
+    #[serde(default)]
+    pub sessions_hidden: bool,
 }
 
 impl ProviderStatus {
@@ -105,6 +108,7 @@ impl ProviderStatus {
             icon_png: None,
             usage,
             accent_rgb: None,
+            sessions_hidden: false,
         }
     }
     pub fn label(&self) -> &str {

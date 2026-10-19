@@ -38,6 +38,9 @@ pub struct AgentStore {
     snapshots: HashMap<AgentId, AgentSnapshot>,
     order: Vec<AgentId>,
     hidden: HashMap<AgentId, SystemTime>,
+    /// Providers toggled off from their bar icon. Unlike `hidden`, this
+    /// also hides sessions that start later, until toggled back on.
+    hidden_providers: HashSet<String>,
     names: HashMap<AgentId, String>,
     group_names: HashMap<GroupKey, String>,
 }
@@ -70,8 +73,32 @@ impl AgentStore {
         self.order
             .iter()
             .filter(|id| !self.hidden.contains_key(*id))
+            .filter(|id| !self.hidden_providers.contains(&id.provider))
             .filter_map(|id| self.snapshots.get(id).cloned())
             .collect()
+    }
+
+    /// Hide every current and future session of a provider, or show them
+    /// again. Sessions closed one by one stay hidden either way.
+    pub fn toggle_provider(&mut self, provider: &str) {
+        if !self.hidden_providers.remove(provider) {
+            self.hidden_providers.insert(provider.to_owned());
+        }
+    }
+
+    pub fn is_provider_hidden(&self, provider: &str) -> bool {
+        self.hidden_providers.contains(provider)
+    }
+
+    /// Hidden provider IDs, sorted so the result is stable.
+    pub fn hidden_providers(&self) -> Vec<String> {
+        let mut providers: Vec<_> = self.hidden_providers.iter().cloned().collect();
+        providers.sort();
+        providers
+    }
+
+    pub fn restore_hidden_providers(&mut self, providers: impl IntoIterator<Item = String>) {
+        self.hidden_providers.extend(providers);
     }
 
     /// The card a session belongs to. Sessions group by working directory,
@@ -460,5 +487,37 @@ mod tests {
         session.last_activity = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(2);
         store.apply_snapshot(vec![session]);
         assert_eq!(store.visible().len(), 1);
+    }
+
+    #[test]
+    fn hidden_provider_hides_current_and_future_sessions_until_toggled() {
+        let mut store = AgentStore::default();
+        let mut openclaw = item("o1");
+        openclaw.id.provider = "openclaw".into();
+        store.apply_snapshot(vec![item("a"), openclaw.clone()]);
+        store.toggle_provider("openclaw");
+        assert!(store.is_provider_hidden("openclaw"));
+        assert_eq!(store.visible().len(), 1);
+
+        // A new, active session of that provider stays hidden too.
+        let mut later = item("o2");
+        later.id.provider = "openclaw".into();
+        later.state = AgentState::Active;
+        later.last_activity = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(5);
+        store.apply_snapshot(vec![item("a"), openclaw.clone(), later]);
+        assert_eq!(store.visible().len(), 1);
+        assert_eq!(store.hidden_providers(), ["openclaw"]);
+
+        // Toggling back shows them, but not a session closed with ×.
+        store.toggle_provider("openclaw");
+        store.hide(&openclaw.id);
+        assert_eq!(store.visible().len(), 2);
+        store.toggle_provider("openclaw");
+        store.toggle_provider("openclaw");
+        assert_eq!(store.visible().len(), 2);
+
+        let mut restored = AgentStore::default();
+        restored.restore_hidden_providers(["openclaw".to_owned()]);
+        assert!(restored.is_provider_hidden("openclaw"));
     }
 }

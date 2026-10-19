@@ -446,7 +446,28 @@ fn restored_store() -> (AgentStore, Vec<agentsmon_core::HiddenSession>) {
     };
     let mut store = AgentStore::default();
     store.restore_hidden(hidden.iter().cloned());
+    match hidden_sessions::providers_path() {
+        Ok(path) => store.restore_hidden_providers(hidden_sessions::load_from::<String>(&path)),
+        Err(error) => tracing::warn!(%error, "hidden providers are not persisted"),
+    }
     (store, hidden)
+}
+
+/// Toggling is rare and explicit: save the provider list right away.
+fn toggle_provider(state: &AppState, provider: &str, cx: &mut App) {
+    close_details(state, cx);
+    close_group_menu(state, cx);
+    let hidden = {
+        let mut store = state.0.store.borrow_mut();
+        store.toggle_provider(provider);
+        store.hidden_providers()
+    };
+    let result =
+        hidden_sessions::providers_path().and_then(|path| hidden_sessions::save_to(&path, &hidden));
+    if let Err(error) = result {
+        tracing::warn!(%error, "cannot save hidden providers");
+    }
+    broadcast(state, cx);
 }
 
 /// Write the hidden-session list when it changed since the last write.
@@ -471,7 +492,10 @@ fn broadcast(state: &AppState, cx: &mut App) {
         .borrow_mut()
         .save_if_changed(state.0.store.borrow().custom_names());
     let slots = state.0.store.borrow().visible_slots();
-    let providers = state.0.provider_statuses.borrow().clone();
+    let mut providers = state.0.provider_statuses.borrow().clone();
+    for provider in &mut providers {
+        provider.sessions_hidden = state.0.store.borrow().is_provider_hidden(&provider.id);
+    }
     let unread = state.0.unread.borrow().clone();
     for panel in state.0.panels.borrow().iter() {
         panel.view.update(cx, |view, cx| {
@@ -617,6 +641,7 @@ fn handle_event(
                 cx,
             );
         }
+        MonitorEvent::ToggleProvider(provider) => toggle_provider(state, provider, cx),
         MonitorEvent::ProvidersMenu { anchor_x } => {
             close_group_menu(state, cx);
             let actions = openclaw_integration::menu_actions(&state.0.openclaw);
@@ -670,6 +695,7 @@ fn handle_menu_event(event: &MonitorEvent, state: &AppState, cx: &mut App) {
         | MonitorEvent::ShowProviderDetails { .. }
         | MonitorEvent::ShowGroup { .. }
         | MonitorEvent::ProvidersMenu { .. }
+        | MonitorEvent::ToggleProvider(_)
         | MonitorEvent::LeaveGroup => {}
     }
 }
