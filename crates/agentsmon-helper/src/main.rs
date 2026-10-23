@@ -124,13 +124,14 @@ fn process_hook(input: &[u8]) -> Result<()> {
     // Sessions without a status line (VS Code, claude.ai) only learn their
     // context usage from the transcript tail, which also carries the title.
     let transcript = transcript::inspect(&hook.transcript_path);
+    let project_dir = std::env::var("CLAUDE_PROJECT_DIR").ok();
     record::merge_record(
         &path,
         record::RecordUpdate {
             session_id: &hook.session_id,
             pid,
             ppid,
-            cwd: &hook.cwd,
+            cwd: session_dir(project_dir.as_deref(), &hook.cwd),
             event,
             state,
             activity,
@@ -145,6 +146,13 @@ fn process_hook(input: &[u8]) -> Result<()> {
             stop_tasks,
         },
     )
+}
+
+/// Directory the session belongs to. Hook `cwd` follows the Bash tool's
+/// working directory, so a `cd ui` (often from a subagent) would move the
+/// card to a `ui` project; Claude exports the launch directory to hooks.
+fn session_dir<'a>(project_dir: Option<&'a str>, cwd: &'a str) -> &'a str {
+    project_dir.filter(|dir| !dir.is_empty()).unwrap_or(cwd)
 }
 
 /// Task id of a bounded watch armed by the main agent with the Monitor tool.
@@ -250,6 +258,13 @@ mod tests {
             background_tasks: vec![],
             session_crons: vec![],
         }
+    }
+
+    #[test]
+    fn keeps_the_launch_directory_after_cd() {
+        assert_eq!(session_dir(Some("/repo"), "/repo/ui"), "/repo");
+        assert_eq!(session_dir(Some(""), "/repo/ui"), "/repo/ui");
+        assert_eq!(session_dir(None, "/repo/ui"), "/repo/ui");
     }
 
     #[test]

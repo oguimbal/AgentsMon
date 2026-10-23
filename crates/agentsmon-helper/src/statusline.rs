@@ -12,9 +12,28 @@ struct StatusLineInput {
     #[serde(default)]
     cwd: String,
     #[serde(default)]
+    workspace: Option<Workspace>,
+    #[serde(default)]
     context_window: Option<ContextWindow>,
     #[serde(default)]
     rate_limits: Option<StatusLineRateLimits>,
+}
+
+#[derive(Deserialize)]
+struct Workspace {
+    #[serde(default)]
+    project_dir: String,
+}
+
+impl StatusLineInput {
+    /// Launch directory: top-level `cwd` follows the Bash tool's `cd`.
+    fn session_dir(&self) -> &str {
+        self.workspace
+            .as_ref()
+            .map(|workspace| workspace.project_dir.as_str())
+            .filter(|dir| !dir.is_empty())
+            .unwrap_or(&self.cwd)
+    }
 }
 
 #[derive(Deserialize)]
@@ -44,6 +63,7 @@ struct OriginalStatusLine {
 
 pub fn proxy(input: &[u8]) -> Result<()> {
     let status: StatusLineInput = serde_json::from_slice(input)?;
+    let cwd = status.session_dir().to_owned();
     let percentage = normalize_percentage(
         status
             .context_window
@@ -59,7 +79,7 @@ pub fn proxy(input: &[u8]) -> Result<()> {
                 ppid: 0,
                 state: "",
                 activity: String::new(),
-                cwd: &status.cwd,
+                cwd: &cwd,
                 // A status-line refresh is a heartbeat, not a lifecycle event.
                 // Keep the last hook event so the provider can distinguish an
                 // in-flight tool from model activity that may be interrupted
@@ -178,6 +198,18 @@ mod tests {
             serde_json::from_str(r#"{"session_id":"x","context_window":{"used_percentage":68.5}}"#)
                 .unwrap();
         assert_eq!(value.context_window.unwrap().used_percentage, Some(68.5));
+    }
+
+    #[test]
+    fn prefers_the_project_directory() {
+        let moved: StatusLineInput = serde_json::from_str(
+            r#"{"session_id":"x","cwd":"/repo/ui","workspace":{"current_dir":"/repo/ui","project_dir":"/repo"}}"#,
+        )
+        .unwrap();
+        assert_eq!(moved.session_dir(), "/repo");
+        let old: StatusLineInput =
+            serde_json::from_str(r#"{"session_id":"x","cwd":"/repo/ui"}"#).unwrap();
+        assert_eq!(old.session_dir(), "/repo/ui");
     }
 
     #[test]
