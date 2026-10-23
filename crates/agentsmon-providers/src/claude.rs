@@ -101,6 +101,15 @@ impl CStatusRecord {
         }
     }
 
+    /// Time of the last hook event; status-line heartbeats leave it alone.
+    fn event_time(&self, fallback: SystemTime) -> SystemTime {
+        self.event_timestamp
+            .as_deref()
+            .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+            .map(SystemTime::from)
+            .unwrap_or(fallback)
+    }
+
     fn last_activity(&self, file: &Path) -> SystemTime {
         DateTime::parse_from_rfc3339(&self.timestamp)
             .map(|date| date.with_timezone(&Utc).into())
@@ -232,12 +241,7 @@ impl AgentProvider for ClaudeProvider {
             let (host_pid, detected_host_app) =
                 find_host(&system, record.pid, record.ppid, record.focused_app_pid);
             let mut state = record.state();
-            let hook_time = record
-                .event_timestamp
-                .as_deref()
-                .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
-                .map(SystemTime::from)
-                .unwrap_or(last_activity);
+            let hook_time = record.event_time(last_activity);
             let process_started = system
                 .process(Pid::from_u32(record.pid as u32))
                 .and_then(|p| {
@@ -393,13 +397,17 @@ fn prefer_agentsmon_records(
             .file_name()
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.ends_with(".agentsmon.cstatus"));
-        let replace =
-            selected
-                .get(&record.session_id)
-                .is_none_or(|(current_owned, _, current_activity)| {
-                    (owned && !current_owned)
-                        || (owned == *current_owned && last_activity > *current_activity)
-                });
+        // A session can leave owned records in several project directories
+        // (transcript moved with a `cd`). The status-line proxy refreshes all
+        // of them, so the last hook event, not the heartbeat, picks the live one.
+        let replace = selected.get(&record.session_id).is_none_or(
+            |(current_owned, current, current_activity)| {
+                (owned && !current_owned)
+                    || (owned == *current_owned
+                        && (record.event_time(last_activity), last_activity)
+                            > (current.event_time(*current_activity), *current_activity))
+            },
+        );
         if replace {
             selected.insert(record.session_id.clone(), (owned, record, last_activity));
         }
@@ -699,6 +707,32 @@ mod tests {
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].0.state(), AgentState::Waiting);
         assert_eq!(selected[0].0.event, "PermissionRequest");
+    }
+
+    #[test]
+    fn stale_duplicate_record_loses_despite_a_newer_heartbeat() {
+        let stale: CStatusRecord = serde_json::from_str(
+            r#"{"session_id":"s","pid":42,"state":"active","event":"PreToolUse","timestamp":"2026-10-23T12:44:56Z","event_timestamp":"2026-10-17T11:40:51Z"}"#,
+        )
+        .unwrap();
+        let live: CStatusRecord = serde_json::from_str(
+            r#"{"session_id":"s","pid":42,"state":"idle","event":"Stop","timestamp":"2026-10-23T12:44:47Z","event_timestamp":"2026-10-23T12:40:00Z"}"#,
+        )
+        .unwrap();
+        let selected = prefer_agentsmon_records(vec![
+            (
+                PathBuf::from("/a/s.agentsmon.cstatus"),
+                live,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+            ),
+            (
+                PathBuf::from("/b/s.agentsmon.cstatus"),
+                stale,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(2),
+            ),
+        ]);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].0.state(), AgentState::Idle);
     }
 
     #[test]
