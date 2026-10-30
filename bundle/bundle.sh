@@ -21,6 +21,12 @@ chmod +x "$APP/Contents/MacOS/agentsmon" "$APP/Contents/Resources/bin/agentsmon-
 
 if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
   codesign --force --deep --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP"
+elif LOCAL_IDENTITY="$(security find-identity -v -p codesigning | awk -F'"' '/Developer ID Application/ {print $2; exit}')" \
+  && [[ -n "$LOCAL_IDENTITY" ]]; then
+  # Local build: a stable identity keeps macOS permissions (Automation for
+  # terminal focus) and login-item approval across rebuilds. No hardened
+  # runtime here: it would need an Apple Events entitlement for osascript.
+  codesign --force --deep --sign "$LOCAL_IDENTITY" "$APP"
 else
   codesign --force --deep --sign - "$APP"
 fi
