@@ -31,6 +31,13 @@ Linux is intentionally not packaged yet. Windows support targets native Claude C
 
 Names entered through **Rename** are saved immediately in `custom-names.json` under the application data directory. They survive restarting AgentsMon and closing/reopening sessions or projects. Session names belong to a provider/session ID; group names belong to the working directory. Submit a blank name to remove its saved override. Provider-generated conversation titles are never written to this file. See [Custom name storage](docs/custom-names.md) for the schema, recovery and tests.
 
+## Download
+
+Signed builds are attached to the [latest release](https://github.com/oguimbal/agentsmon/releases/latest):
+
+- macOS (Apple Silicon, macOS 13+): [`AgentsMon.dmg`](https://github.com/oguimbal/agentsmon/releases/latest/download/AgentsMon.dmg), notarised;
+- Windows 10+ (x64): [`AgentsMon-setup.exe`](https://github.com/oguimbal/agentsmon/releases/latest/download/AgentsMon-setup.exe), per-user installer, or the portable `.zip` of the release.
+
 ## Build
 
 Use the stable Rust toolchain. GPUI's current dependencies require a recent stable compiler.

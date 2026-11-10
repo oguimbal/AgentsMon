@@ -10,3 +10,9 @@ run:
 bundle:
     ./bundle/bundle.sh
 
+dmg:
+    ./bundle/dmg.sh
+
+# Bump the version, commit, tag and push; CI builds, signs and publishes.
+release bump="patch":
+    ./scripts/release.sh {{bump}}

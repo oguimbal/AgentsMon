@@ -2,10 +2,15 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-APP="$ROOT/dist/AgentsMon.app"
+# AGENTSMON_DIST: build somewhere else than dist/, e.g. to leave a running
+# dist/AgentsMon.app alone.
+APP="${AGENTSMON_DIST:-$ROOT/dist}/AgentsMon.app"
 BUILD_PROFILE="${AGENTSMON_BUILD_PROFILE:-release}"
 
 cd "$ROOT"
+# The updater compares the Cargo version with the release tag, and the
+# relaunch-after-update check reads Info.plist: they must agree.
+./bundle/verify-version.sh
 RUSTC="$(rustup which --toolchain stable rustc)" \
 RUSTDOC="$(rustup which --toolchain stable rustdoc)" \
   rustup run stable cargo build --profile "$BUILD_PROFILE" -p agentsmon -p agentsmon-helper
@@ -20,7 +25,12 @@ cp bundle/Info.plist "$APP/Contents/Info.plist"
 chmod +x "$APP/Contents/MacOS/agentsmon" "$APP/Contents/Resources/bin/agentsmon-helper" "$APP/Contents/Resources/codex-plugin/bin/agentsmon-helper"
 
 if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
-  codesign --force --deep --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP"
+  # Release build. --deep does not sign executables under Resources, and the
+  # notary service rejects any unsigned Mach-O: sign both helpers first.
+  SIGN=(codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY")
+  "${SIGN[@]}" "$APP/Contents/Resources/bin/agentsmon-helper" \
+    "$APP/Contents/Resources/codex-plugin/bin/agentsmon-helper"
+  "${SIGN[@]}" --entitlements "$ROOT/bundle/entitlements.plist" "$APP"
 elif LOCAL_IDENTITY="$(security find-identity -v -p codesigning | awk -F'"' '/Developer ID Application/ {print $2; exit}')" \
   && [[ -n "$LOCAL_IDENTITY" ]]; then
   # Local build: a stable identity keeps macOS permissions (Automation for

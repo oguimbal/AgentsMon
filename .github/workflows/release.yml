@@ -1,0 +1,241 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  # Dry run from main: builds and signs the Windows artifacts, uploads them
+  # to the run, publishes nothing.
+  workflow_dispatch:
+
+jobs:
+  build-macos:
+    if: github.event_name == 'push'
+    runs-on: macos-14
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Verify version sync
+        run: ./bundle/verify-version.sh
+
+      # Import the Developer ID Application certificate into a temporary
+      # keychain so `codesign --sign "$CODESIGN_IDENTITY"` in bundle.sh finds
+      # it. A stable identity keeps the macOS permissions of returning users
+      # across releases. The keychain disappears with the runner. Without the
+      # secret, bundle.sh signs ad hoc and notarisation fails explicitly.
+      - name: Import signing certificate
+        env:
+          CODESIGN_CERT_P12_BASE64: ${{ secrets.CODESIGN_CERT_P12_BASE64 }}
+          CODESIGN_CERT_PASSWORD: ${{ secrets.CODESIGN_CERT_PASSWORD }}
+        run: |
+          if [ -z "$CODESIGN_CERT_P12_BASE64" ]; then
+            echo "No signing secret configured — bundle will ad-hoc sign."
+            exit 0
+          fi
+          CERT_PATH="$RUNNER_TEMP/cert.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PASSWORD=$(openssl rand -hex 32)
+          echo -n "$CODESIGN_CERT_P12_BASE64" | base64 --decode -o "$CERT_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          # `-T /usr/bin/codesign` lets codesign use the key without a GUI
+          # prompt. `-f pkcs12` without `-t` imports the certificate and its
+          # private key.
+          security import "$CERT_PATH" -P "$CODESIGN_CERT_PASSWORD" \
+              -f pkcs12 -k "$KEYCHAIN_PATH" \
+              -T /usr/bin/codesign -T /usr/bin/security -T /usr/bin/productsign
+          # `-k` here is the keychain password, not its path: the ACL update
+          # must not trigger an interactive unlock.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+              -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" >/dev/null
+          security list-keychain -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+
+      - name: Verify imported identity
+        env:
+          CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
+        run: |
+          echo ">> Identities in temp keychain:"
+          security find-identity -v -p codesigning "$RUNNER_TEMP/build.keychain-db" || true
+          echo ">> CODESIGN_IDENTITY length: ${#CODESIGN_IDENTITY} chars (value masked)"
+          # Fail here with a clear message instead of bundle.sh's "no identity
+          # found" several steps later.
+          if ! security find-identity -v -p codesigning | grep -q "$CODESIGN_IDENTITY"; then
+              echo "FATAL: CODESIGN_IDENTITY not found in keychain search path." >&2
+              echo "Either the .p12 was exported without its private key, or the" >&2
+              echo "CODESIGN_IDENTITY secret doesn't match the cert's common name." >&2
+              exit 1
+          fi
+
+      # Reach the notary service before building, so a wrong app-specific
+      # password fails now rather than after sign + zip + upload.
+      - name: Verify notary credentials
+        env:
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+        run: |
+          echo ">> NOTARY_APPLE_ID length: ${#NOTARY_APPLE_ID} chars"
+          echo ">> NOTARY_TEAM_ID length: ${#NOTARY_TEAM_ID} chars"
+          echo ">> NOTARY_PASSWORD length: ${#NOTARY_PASSWORD} chars"
+          xcrun notarytool history \
+              --apple-id "$NOTARY_APPLE_ID" \
+              --team-id "$NOTARY_TEAM_ID" \
+              --password "$NOTARY_PASSWORD" \
+              | head -5
+
+      # Builds agentsmon and agentsmon-helper (arm64), assembles the bundle
+      # and signs the two helper copies, then the application.
+      - name: Build and bundle .app
+        env:
+          CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
+        run: ./bundle/bundle.sh
+
+      # Notarise the .app, then staple the ticket into the bundle: a user who
+      # copies the app out of the DMG while offline still passes Gatekeeper.
+      - name: Notarise .app
+        env:
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+        run: ./bundle/notarize.sh dist/AgentsMon.app
+
+      - name: Install create-dmg
+        run: brew install create-dmg
+
+      - name: Create DMG
+        env:
+          CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
+        run: ./bundle/dmg.sh
+
+      - name: Notarise DMG
+        env:
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+        run: ./bundle/notarize.sh dist/AgentsMon.dmg
+
+      # Stable file name (no version): the updater and
+      # /releases/latest/download/AgentsMon.dmg resolve across versions.
+      - name: Publish GitHub Release (DMG)
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/AgentsMon.dmg
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+
+  build-windows:
+    # Produces a portable .zip and an Inno Setup installer (per-user, no UAC).
+    # Both executables, the setup and its uninstaller are signed with Oganbo's
+    # Azure Artifact Signing identity through GitHub OIDC: the
+    # `windows-release` environment (tags `v*` + main only) is what the Entra
+    # federated credential trusts. Both assets join the GitHub Release the
+    # macOS job creates (softprops merges by tag).
+    runs-on: windows-latest
+    environment: windows-release
+    permissions:
+      contents: write
+      id-token: write
+    env:
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARTIFACT_SIGNING_ACCOUNT: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+      ARTIFACT_SIGNING_PROFILE: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binaries
+        run: cargo build --release -p agentsmon -p agentsmon-helper
+
+      # The updater refuses a setup without the Oganbo signature, so missing
+      # signing configuration fails here.
+      - name: Install signing tools
+        shell: pwsh
+        run: bundle\windows\signing-tools.ps1 -Destination "$env:RUNNER_TEMP\signing-tools"
+
+      - name: Sign release binaries
+        shell: pwsh
+        run: bundle\windows\sign.ps1 target\release\agentsmon.exe target\release\agentsmon-helper.exe
+
+      - name: Version
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq 'push') {
+              $tag = "${{ github.ref_name }}"            # e.g. "v0.1.15"
+          } else {
+              $tag = "v0.0.0-dev"
+          }
+          "TAG=$tag" >> $env:GITHUB_ENV
+          "APP_VERSION=$($tag.TrimStart('v'))" >> $env:GITHUB_ENV
+
+      # Same layout as scripts\build-windows.ps1 and installer.iss.
+      - name: Stage portable zip
+        shell: pwsh
+        run: |
+          $stage = "dist\AgentsMon-$env:TAG-windows-x86_64-portable"
+          New-Item -ItemType Directory -Path "$stage\codex-plugin" -Force | Out-Null
+          Copy-Item target\release\agentsmon.exe $stage
+          Copy-Item target\release\agentsmon-helper.exe $stage
+          Copy-Item plugins\agentsmon-codex\* "$stage\codex-plugin" -Recurse -Force
+          New-Item -ItemType Directory -Path "$stage\codex-plugin\bin" -Force | Out-Null
+          Copy-Item target\release\agentsmon-helper.exe "$stage\codex-plugin\bin\agentsmon-helper.exe"
+          Copy-Item LICENSE "$stage\LICENSE"
+          Copy-Item README.md "$stage\README.md"
+          Compress-Archive -Path "$stage\*" -DestinationPath "dist\AgentsMon-$env:TAG-windows-x86_64-portable.zip" -Force
+
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\iscc.exe"
+          if (-not (Test-Path $iscc)) {
+              # Inno Setup 6 is preinstalled on the windows-latest image. A
+              # release without the installer is worse than a failed run.
+              throw "ISCC not found at $iscc - runner image changed?"
+          }
+          # $q / $f are Inno's quote and quoted-file placeholders.
+          $sign = (Resolve-Path bundle\windows\sign.ps1).Path
+          & $iscc /DAppVersion=$env:APP_VERSION /DSigned ('/Sazuresign=pwsh -NoProfile -File $q' + $sign + '$q $f') bundle\windows\installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "iscc failed: $LASTEXITCODE" }
+          # Stable file name (no version), like AgentsMon.dmg.
+          $out = "dist\AgentsMon-setup.exe"
+          if (-not (Test-Path $out)) { throw "expected $out" }
+          Get-Item $out | Format-List Name,Length,LastWriteTime
+
+      - name: Verify signatures
+        shell: pwsh
+        run: |
+          $stage = "dist\AgentsMon-$env:TAG-windows-x86_64-portable"
+          bundle\windows\sign.ps1 -VerifyOnly "$stage\agentsmon.exe" "$stage\agentsmon-helper.exe" dist\AgentsMon-setup.exe
+          & $env:SIGNTOOL verify /pa /all dist\AgentsMon-setup.exe
+          if ($LASTEXITCODE -ne 0) { throw "signtool verify failed" }
+
+      - name: Upload dry-run artifacts
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-signed
+          path: |
+            dist/AgentsMon-${{ env.TAG }}-windows-x86_64-portable.zip
+            dist/AgentsMon-setup.exe
+
+      - name: Publish GitHub Release (Windows artifacts)
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/AgentsMon-${{ github.ref_name }}-windows-x86_64-portable.zip
+            dist/AgentsMon-setup.exe
+          generate_release_notes: true
+          draft: false
+          prerelease: false

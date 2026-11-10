@@ -25,6 +25,17 @@ claude plugin validate .
 - UI state changes must be broadcast to every display panel.
 - Keep the no-tray product decision. The normal Dock/taskbar application presence is intentional.
 
+## Releases
+
+- `just release` (`./scripts/release.sh [patch|minor|major|X.Y.Z] [--no-push]`) bumps the workspace version in `Cargo.toml` and `CFBundleShortVersionString` in `bundle/Info.plist`, refreshes `Cargo.lock`, commits `release vX.Y.Z`, tags it and pushes. It builds nothing: the public artifacts only come from CI, from the tag commit. The plugin manifests keep their own versions (they version the hook contract, not the application).
+- A `v*` tag runs `.github/workflows/release.yml`. macOS job (`macos-14`, arm64 only): `bundle/bundle.sh` signs the two `agentsmon-helper` copies, then the application, with the hardened runtime and `bundle/entitlements.plist`; `bundle/notarize.sh` notarises and staples the `.app`, `bundle/dmg.sh` builds the DMG, which is notarised too. Windows job: both executables, the Inno Setup installer and its uninstaller are signed with Azure Artifact Signing through GitHub OIDC (`bundle/windows/`). `workflow_dispatch` is a Windows-only dry run that publishes nothing.
+- Published assets: `AgentsMon.dmg`, `AgentsMon-setup.exe` and `AgentsMon-vX.Y.Z-windows-x86_64-portable.zip`. The first two names carry no version on purpose; the in-app updater and the README links depend on them.
+- Repository secrets: `CODESIGN_CERT_P12_BASE64`, `CODESIGN_CERT_PASSWORD`, `CODESIGN_IDENTITY`, `NOTARY_APPLE_ID`, `NOTARY_TEAM_ID`, `NOTARY_PASSWORD`. Variables of the `windows-release` environment (restricted to `main` and `v*` tags): `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `ARTIFACT_SIGNING_ACCOUNT`, `ARTIFACT_SIGNING_PROFILE`. The Entra application needs a federated credential for `repo:oguimbal/agentsmon:environment:windows-release`.
+- A missing macOS secret gives an ad-hoc signature and a failed notarisation; missing Windows configuration fails the job. Both are intended: no unsigned public build.
+- The Windows signer is identified by its EKU, never a thumbprint (Artifact Signing certificates rotate every few days). It is pinned in `bundle/windows/sign.ps1` and `crates/agentsmon/src/authenticode.rs`; keep them in sync.
+- `AppId` in `bundle/windows/installer.iss` never changes. The installer file list follows `scripts/build-windows.ps1`.
+- To try the release signature locally without replacing a running `dist/AgentsMon.app`: `AGENTSMON_DIST=<dir> CODESIGN_IDENTITY="<identity>" ./bundle/bundle.sh`. Notarisation is not part of local builds.
+
 ## Local source IPC
 
 - `crates/local-source-ipc` is vendored identically in LeSwitcheur and defines the versioned contract, socket transport and golden v1 fixture; see its README. Neither repository requires a sibling checkout to build.
