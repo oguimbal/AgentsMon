@@ -494,7 +494,7 @@ fn latest_lifecycle(path: &Path) -> std::io::Result<Option<LifecycleEvent>> {
 }
 
 pub fn default_runtime_root() -> PathBuf {
-    directories::ProjectDirs::from("com", "oliv", "AgentsMon")
+    crate::app_dirs::project_dirs()
         .map(|dirs| dirs.data_dir().join("codex"))
         .unwrap_or_else(|| PathBuf::from(".agentsmon/codex"))
 }

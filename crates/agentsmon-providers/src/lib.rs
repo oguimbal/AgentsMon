@@ -1,3 +1,4 @@
+pub mod app_dirs;
 mod claude;
 mod claude_runtime;
 mod codex;

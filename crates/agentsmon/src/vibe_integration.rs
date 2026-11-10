@@ -24,7 +24,7 @@ pub fn install() -> Result<()> {
     }
     let format = hook_format(&String::from_utf8_lossy(&output.stdout))?;
     let home = agentsmon_providers::vibe::home_dir();
-    let dirs = directories::ProjectDirs::from("com", "oliv", "AgentsMon")
+    let dirs = agentsmon_providers::app_dirs::project_dirs()
         .context("cannot resolve AgentsMon data directory")?;
     let helper = dirs
         .data_dir()

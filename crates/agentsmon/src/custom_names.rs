@@ -31,7 +31,7 @@ pub struct Persistence {
 
 impl Persistence {
     pub fn new() -> Self {
-        let path = directories::ProjectDirs::from("com", "oliv", "AgentsMon")
+        let path = agentsmon_providers::app_dirs::project_dirs()
             .map(|dirs| dirs.data_dir().join(FILE_NAME));
         Self::load(path)
     }

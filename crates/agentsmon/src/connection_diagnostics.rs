@@ -36,7 +36,7 @@ pub struct ConnectionDiagnostics {
 
 impl ConnectionDiagnostics {
     pub fn new() -> Self {
-        let root = directories::ProjectDirs::from("com", "oliv", "AgentsMon")
+        let root = agentsmon_providers::app_dirs::project_dirs()
             .map(|dirs| dirs.data_dir().join("diagnostics"));
         Self::load(root)
     }

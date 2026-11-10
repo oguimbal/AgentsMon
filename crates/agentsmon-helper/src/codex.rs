@@ -155,7 +155,7 @@ fn event_state(input: &HookInput) -> (&'static str, String) {
 }
 
 fn runtime_root() -> Result<PathBuf> {
-    let dirs = directories::ProjectDirs::from("com", "oliv", "AgentsMon")
+    let dirs = agentsmon_providers::app_dirs::project_dirs()
         .context("cannot resolve AgentsMon data directory")?;
     Ok(dirs.data_dir().join("codex"))
 }

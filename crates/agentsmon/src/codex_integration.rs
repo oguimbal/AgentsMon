@@ -24,7 +24,7 @@ pub fn install() -> Result<()> {
         return Ok(());
     }
     let helper_source = super::integration::helper_source()?;
-    let dirs = directories::ProjectDirs::from("com", "oliv", "AgentsMon")
+    let dirs = agentsmon_providers::app_dirs::project_dirs()
         .context("cannot resolve AgentsMon data directory")?;
     let stable_helper = dirs
         .data_dir()

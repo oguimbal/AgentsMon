@@ -20,7 +20,7 @@ pub(crate) fn providers_path() -> Result<PathBuf> {
 }
 
 fn data_file(name: &str) -> Result<PathBuf> {
-    let dirs = directories::ProjectDirs::from("com", "oliv", "AgentsMon")
+    let dirs = agentsmon_providers::app_dirs::project_dirs()
         .context("cannot resolve AgentsMon data directory")?;
     Ok(dirs.data_dir().join(name))
 }

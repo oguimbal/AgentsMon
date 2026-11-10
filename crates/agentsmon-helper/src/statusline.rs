@@ -163,7 +163,7 @@ fn original_config() -> Option<std::path::PathBuf> {
     if let Some(directory) = std::env::var_os("AGENTSMON_CONFIG_DIR") {
         return Some(std::path::PathBuf::from(directory).join("statusline-original.json"));
     }
-    directories::ProjectDirs::from("com", "oliv", "AgentsMon")
+    agentsmon_providers::app_dirs::project_dirs()
         .map(|dirs| dirs.config_dir().join("statusline-original.json"))
 }
 

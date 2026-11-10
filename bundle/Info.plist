@@ -4,7 +4,7 @@
 <dict>
   <key>CFBundleDevelopmentRegion</key><string>en</string>
   <key>CFBundleExecutable</key><string>agentsmon</string>
-  <key>CFBundleIdentifier</key><string>com.oliv.AgentsMon</string>
+  <key>CFBundleIdentifier</key><string>fr.gmbl.AgentsMon</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundleName</key><string>AgentsMon</string>
   <key>CFBundleDisplayName</key><string>AgentsMon</string>

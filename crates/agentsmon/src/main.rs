@@ -757,7 +757,7 @@ fn open_group_menu(
         show: true,
         display_id: Some(display_id),
         window_background: WindowBackgroundAppearance::Transparent,
-        app_id: Some("com.oliv.AgentsMon.menu".into()),
+        app_id: Some("fr.gmbl.AgentsMon.menu".into()),
         ..Default::default()
     };
     let member_count = members.len();
@@ -845,7 +845,7 @@ fn open_rename(
         show: true,
         display_id: Some(display_id),
         window_background: WindowBackgroundAppearance::Transparent,
-        app_id: Some("com.oliv.AgentsMon.rename".into()),
+        app_id: Some("fr.gmbl.AgentsMon.rename".into()),
         ..Default::default()
     };
     let provider_names: Vec<String> = match &target {
@@ -940,7 +940,7 @@ fn open_actions_menu(
         show: true,
         display_id: Some(display_id),
         window_background: WindowBackgroundAppearance::Transparent,
-        app_id: Some("com.oliv.AgentsMon.actions".into()),
+        app_id: Some("fr.gmbl.AgentsMon.actions".into()),
         ..Default::default()
     };
     let entity_slot = Rc::new(RefCell::new(None));
@@ -1120,7 +1120,7 @@ fn open_details_at(
         show: true,
         display_id: Some(display_id),
         window_background: WindowBackgroundAppearance::Transparent,
-        app_id: Some("com.oliv.AgentsMon.details".into()),
+        app_id: Some("fr.gmbl.AgentsMon.details".into()),
         ..Default::default()
     };
     let provider_name = provider_display_name(state, &agent.id.provider);
@@ -1171,7 +1171,7 @@ fn open_provider_details(
         show: true,
         display_id: Some(display_id),
         window_background: WindowBackgroundAppearance::Transparent,
-        app_id: Some("com.oliv.AgentsMon.provider-details".into()),
+        app_id: Some("fr.gmbl.AgentsMon.provider-details".into()),
         ..Default::default()
     };
     match cx.open_window(options, move |_, cx| {
@@ -1235,7 +1235,7 @@ fn reconcile_displays(cx: &mut App, state: &AppState, force: bool) {
             show: true,
             display_id: Some(display.id()),
             window_background: WindowBackgroundAppearance::Transparent,
-            app_id: Some("com.oliv.AgentsMon".into()),
+            app_id: Some("fr.gmbl.AgentsMon".into()),
             ..Default::default()
         };
 

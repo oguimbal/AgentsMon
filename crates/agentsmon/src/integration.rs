@@ -127,9 +127,8 @@ fn installed_agentsmon_paths() -> Vec<PathBuf> {
 }
 
 fn install_plugin(data: &Path) -> Result<()> {
-    let claude = claude_executable().context(
-        "Claude Code est introuvable. Vérifiez son installation puis relancez AgentsMon.",
-    )?;
+    let claude = claude_executable()
+        .context("Claude Code not found. Check its installation, then restart AgentsMon.")?;
     let marketplace = data.join("marketplace");
 
     let _ = Command::new(&claude)
@@ -200,7 +199,19 @@ fn claude_executable() -> Option<PathBuf> {
 fn install_statusline_proxy(helper: &Path, config_dir: &Path) -> Result<()> {
     let mut settings = read_settings()?;
     let original = settings.get("statusLine").cloned();
+    let command = format!("\"{}\" statusline-proxy", helper.display());
     if original.as_ref().is_some_and(owns_statusline) {
+        // Ours already: the saved original stays. Only a proxy whose helper no
+        // longer exists (data directory moved) is pointed at the current one.
+        let missing = original
+            .as_ref()
+            .and_then(|value| value.get("command")?.as_str())
+            .and_then(proxy_helper_path)
+            .is_some_and(|path| !Path::new(path).is_file());
+        if missing {
+            settings["statusLine"]["command"] = json!(command);
+            return write_settings(&settings);
+        }
         return Ok(());
     }
     fs::create_dir_all(config_dir)?;
@@ -215,7 +226,6 @@ fn install_statusline_proxy(helper: &Path, config_dir: &Path) -> Result<()> {
             fs::remove_file(marker)?;
         }
     }
-    let command = format!("\"{}\" statusline-proxy", helper.display());
     settings["statusLine"] = json!({
         "type": "command",
         "command": command,
@@ -248,6 +258,13 @@ fn owns_statusline(value: &Value) -> bool {
         .is_some_and(|command| {
             command.contains("agentsmon-helper") && command.contains("statusline-proxy")
         })
+}
+
+/// The helper path of a command written by `install_statusline_proxy`.
+fn proxy_helper_path(command: &str) -> Option<&str> {
+    command
+        .strip_prefix('"')?
+        .strip_suffix("\" statusline-proxy")
 }
 
 fn restore_statusline_value(settings: &mut Value, original: Option<Value>) {
@@ -320,8 +337,7 @@ fn home_dir() -> PathBuf {
 }
 
 fn project_dirs() -> Result<directories::ProjectDirs> {
-    directories::ProjectDirs::from("com", "oliv", "AgentsMon")
-        .context("cannot resolve AgentsMon data directory")
+    agentsmon_providers::app_dirs::project_dirs().context("cannot resolve AgentsMon data directory")
 }
 
 pub(crate) fn helper_source() -> Result<PathBuf> {
@@ -389,6 +405,18 @@ mod tests {
         assert!(!super::owns_statusline(&json!({
             "command": "my-statusline.sh"
         })));
+    }
+
+    #[test]
+    fn reads_the_helper_path_of_our_proxy_only() {
+        assert_eq!(
+            super::proxy_helper_path("\"/data dir/bin/agentsmon-helper\" statusline-proxy"),
+            Some("/data dir/bin/agentsmon-helper")
+        );
+        assert_eq!(
+            super::proxy_helper_path("agentsmon-helper statusline-proxy --mine"),
+            None
+        );
     }
 
     #[test]

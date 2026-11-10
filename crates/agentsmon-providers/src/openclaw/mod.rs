@@ -27,7 +27,7 @@ const DEFAULT_RECENT_HOURS: u64 = 24;
 const MAX_SESSIONS: u32 = 24;
 
 pub fn data_dir() -> Option<PathBuf> {
-    directories::ProjectDirs::from("com", "oliv", "AgentsMon").map(|dirs| dirs.data_dir().into())
+    crate::app_dirs::project_dirs().map(|dirs| dirs.data_dir().into())
 }
 
 /// `openclaw.json` in the AgentsMon data directory. AgentsMon writes only
