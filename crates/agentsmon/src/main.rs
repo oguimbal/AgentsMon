@@ -36,6 +36,7 @@ const RENAME_WINDOW_TITLE: &str = "Rename conversation";
 const MENU_WINDOW_TITLE: &str = "Group conversations";
 const ACTIONS_WINDOW_TITLE: &str = "Provider actions";
 const ACTIONS_MENU_WIDTH: f32 = 200.0;
+const QUIT_ACTION: &str = "app.quit";
 /// How long the pointer may be outside both a group card and its menu before
 /// the menu closes; covers the travel between the two.
 const MENU_GRACE: Duration = Duration::from_millis(300);
@@ -747,9 +748,13 @@ fn handle_event(
             );
         }
         MonitorEvent::ToggleProvider(provider) => toggle_provider(state, provider, cx),
-        MonitorEvent::ProvidersMenu { anchor_x } => {
+        MonitorEvent::BarMenu { anchor_x } => {
             close_group_menu(state, cx);
-            let actions = openclaw_integration::menu_actions(&state.0.openclaw);
+            let mut actions = openclaw_integration::menu_actions(&state.0.openclaw);
+            actions.push(MenuAction {
+                id: QUIT_ACTION.into(),
+                label: "Quit AgentsMon".into(),
+            });
             open_actions_menu(state, display_id, display_bounds, *anchor_x, actions, cx);
         }
         MonitorEvent::InstallUpdate => install_update(state, cx),
@@ -800,7 +805,7 @@ fn handle_menu_event(event: &MonitorEvent, state: &AppState, cx: &mut App) {
         | MonitorEvent::MoveBarBy(_)
         | MonitorEvent::ShowProviderDetails { .. }
         | MonitorEvent::ShowGroup { .. }
-        | MonitorEvent::ProvidersMenu { .. }
+        | MonitorEvent::BarMenu { .. }
         | MonitorEvent::ToggleProvider(_)
         | MonitorEvent::InstallUpdate
         | MonitorEvent::LeaveGroup => {}
@@ -1002,8 +1007,8 @@ fn close_actions_menu(state: &AppState, cx: &mut App) {
     }
 }
 
-/// The provider actions menu, opened above the provider icons. Nothing opens
-/// when no provider has an action to offer.
+/// The bar menu, opened above the place of the right click: the provider
+/// actions, then Quit.
 fn open_actions_menu(
     state: &AppState,
     display_id: DisplayId,
@@ -1066,12 +1071,14 @@ fn open_actions_menu(
                     ActionMenuEvent::Select(id) if id == openclaw_integration::CONNECT_ACTION => {
                         open_openclaw_connect(&event_state, cx)
                     }
+                    // Same effect as the Quit entry of the application menu.
+                    ActionMenuEvent::Select(id) if id == QUIT_ACTION => cx.quit(),
                     ActionMenuEvent::Select(_) | ActionMenuEvent::Dismiss => {}
                 }
             })
             .detach();
         }
-        Err(error) => tracing::warn!(%error, "cannot open provider actions menu"),
+        Err(error) => tracing::warn!(%error, "cannot open the bar menu"),
     }
 }
 

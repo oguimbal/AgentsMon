@@ -91,8 +91,9 @@ pub enum MonitorEvent {
     },
     /// Left click on a provider icon: hide or show all its sessions.
     ToggleProvider(String),
-    /// Right click on the provider icons: open the provider actions menu.
-    ProvidersMenu {
+    /// Right click on the bar outside the cards: open the bar menu (provider
+    /// actions, then Quit).
+    BarMenu {
         anchor_x: f32,
     },
     /// Click on the update arrow: download and install the announced version.
@@ -485,6 +486,16 @@ impl MonitorView {
                     this.bar_drag_last_x = Some(event.position.x);
                 }),
             )
+            // Cards and groups stop the right click (rename prompt); anywhere
+            // else on the bar opens the menu.
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|_, event: &MouseDownEvent, _, cx| {
+                    cx.emit(MonitorEvent::BarMenu {
+                        anchor_x: event.position.x.as_f32(),
+                    });
+                }),
+            )
             .on_drag(BarDrag, |_, _, _, cx| cx.new(|_| BarDragPreview))
             .on_drag_move::<BarDrag>(cx.listener(|this, event: &DragMoveEvent<BarDrag>, _, cx| {
                 let x = event.event.position.x;
@@ -506,15 +517,6 @@ impl MonitorView {
                     .clone()
                     .into_iter()
                     .map(|provider| self.render_provider(provider, cx)),
-            )
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(|_, event: &MouseDownEvent, _, cx| {
-                    cx.stop_propagation();
-                    cx.emit(MonitorEvent::ProvidersMenu {
-                        anchor_x: event.position.x.as_f32(),
-                    });
-                }),
             );
         let root = root
             .child(providers)

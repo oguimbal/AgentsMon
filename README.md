@@ -9,6 +9,7 @@ Each physical display gets the same low-profile bar in its bottom-left corner. E
 - a circular context-window gauge around the state dot, on a thin ring in the provider's brand colour (Claude terracotta, Codex green, Mistral orange) so agents working on the same repository stay apart;
 - drag-and-drop ordering and a hide action that survives restarts until the session becomes active again;
 - right-click to rename a card (the prompt shows the conversation title and full path; an empty name restores the repository name);
+- right-click anywhere else on the bar for a menu with the provider actions and "Quit AgentsMon";
 - sessions sharing a working directory fold into one group card: the pill is split into equal stripes (one per member state), the indicator shows the member count ringed by provider colours, and hovering unfolds a menu of the members above the bar, each with its own details, focus, hide and rename;
 - click-to-focus for the host terminal or IDE, down to the exact tab in Warp and iTerm2 (see [Terminal focus](docs/terminal-focus.md)).
 

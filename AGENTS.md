@@ -60,6 +60,7 @@ claude plugin validate .
 - One panel per physical display, bottom-left and always on top. On Windows the panel sits on the work area, above the taskbar; check it at a display scale other than 100%, GPUI pop-ups start with a native frame and a minimum height that `pin_bar` removes.
 - Screen hotplug and resolution changes reconcile panels without duplicates.
 - Dragging on one panel changes all panels; clicking the × never focuses the session.
+- A right click on a card opens the rename prompt; a right click elsewhere on the bar (provider icons, empty space, update arrow) opens the bar menu, whose last entry quits AgentsMon.
 - Rename a session and a group, restart AgentsMon, and check both names. Close/reopen the project, then clear each name and restart again: the cleared names must not return. See `docs/custom-names.md` for storage and recovery.
 - With a release newer than the running version, the update arrow appears at the right of every bar without clipping the last card; a click downloads, then opens the DMG (macOS) or runs the signed installer (Windows).
 - Context values 0, 1, 50, 99, 100 and unavailable render correctly.

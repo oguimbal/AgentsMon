@@ -1,6 +1,6 @@
 //! Provider-agnostic setup views: the small actions menu opened by a right
-//! click on the provider icons, and a connect form with a status area. The
-//! application supplies every label; nothing here knows about a provider.
+//! click on the bar, and a connect form with a status area. The application
+//! supplies every label; nothing here knows about a provider.
 
 use gpui::prelude::*;
 use gpui::{
