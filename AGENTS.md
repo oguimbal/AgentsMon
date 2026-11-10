@@ -36,7 +36,7 @@ claude plugin validate .
 - Before changing the OpenClaw Gateway client, read `docs/openclaw-gateway.md`. Keep the read-only scope, the field allowlist and the park-on-credential-failure policy (no retry loop on refused auth).
 - Before changing Claude interruption handling, read `docs/claude-session-status.md`. Preserve explicit lifecycle timestamps, PID/session validation and fallback for older Claude processes. Silence or low CPU usage never establishes that a session is idle.
 
-- One panel per physical display, bottom-left and always on top.
+- One panel per physical display, bottom-left and always on top. On Windows the panel sits on the work area, above the taskbar; check it at a display scale other than 100%, GPUI pop-ups start with a native frame and a minimum height that `pin_bar` removes.
 - Screen hotplug and resolution changes reconcile panels without duplicates.
 - Dragging on one panel changes all panels; clicking the × never focuses the session.
 - Rename a session and a group, restart AgentsMon, and check both names. Close/reopen the project, then clear each name and restart again: the cleared names must not return. See `docs/custom-names.md` for storage and recovery.

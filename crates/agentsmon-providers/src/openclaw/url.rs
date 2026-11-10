@@ -46,9 +46,7 @@ pub fn session_path(
     let namespace = format!("{}/chat", normalize_base_path(base_path));
     let agent = encode_path_segment(&agent_id);
     let normalized_rest = rest.to_lowercase();
-    if normalized_rest == MAIN_KEY
-        || (!is_parsed && (normalized_rest == MAIN_KEY || normalized_rest == "global"))
-    {
+    if normalized_rest == MAIN_KEY || (!is_parsed && normalized_rest == "global") {
         return Some(format!("{namespace}/{agent}"));
     }
     let segments: Vec<&str> = rest.split(':').collect();

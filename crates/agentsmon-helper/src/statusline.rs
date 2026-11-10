@@ -121,9 +121,14 @@ fn run_original(input: &[u8]) -> Result<()> {
             command.args(["-lc", &original.command]);
             command
         } else {
+            use std::os::windows::process::CommandExt;
             let mut command =
                 Command::new(std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into()));
-            command.args(["/D", "/S", "/C", &original.command]);
+            // cmd.exe does not understand the \" escaping of Command::arg. /S strips
+            // the outer quotes and leaves the command untouched.
+            command
+                .args(["/D", "/S", "/C"])
+                .raw_arg(format!("\"{}\"", original.command));
             command
         };
         command

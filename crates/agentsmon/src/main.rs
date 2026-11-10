@@ -27,6 +27,8 @@ actions!(
 );
 
 const BAR_HEIGHT: f32 = 23.0;
+/// Set once a Windows bar lost its frame: an idle bar has nothing else to resize it.
+static BARS_NEED_LAYOUT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 const SCREEN_INSET: f32 = 0.0;
 const DETAILS_WIDTH: f32 = 400.0;
 const DETAILS_GAP: f32 = 6.0;
@@ -356,6 +358,9 @@ fn spawn_refresh_loop(cx: &mut App, state: AppState, poll_interval: Duration) {
     let mut last_refresh = Instant::now();
     let mut refresh_pending = false;
     cx.spawn(async move |cx: &mut AsyncApp| loop {
+        if BARS_NEED_LAYOUT.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            cx.update(|cx| broadcast(&state, cx));
+        }
         while let Ok(command) = state.0.local_source.commands.try_recv() {
             if Instant::now() < command.deadline {
                 let result = cx.update(|cx| focus_agent_result(&command.id, &state, cx));
@@ -1191,7 +1196,7 @@ fn reconcile_displays(cx: &mut App, state: &AppState, force: bool) {
         .collect();
     let next: Vec<_> = displays
         .iter()
-        .map(|display| (display.id(), display.bounds()))
+        .map(|display| (display.id(), panel_area(display.as_ref())))
         .collect();
     if !force && current == next {
         return;
@@ -1208,7 +1213,7 @@ fn reconcile_displays(cx: &mut App, state: &AppState, force: bool) {
     let providers = state.0.provider_statuses.borrow().clone();
     let unread = state.0.unread.borrow().clone();
     for display in displays {
-        let bounds = display.bounds();
+        let bounds = panel_area(display.as_ref());
         let max_width = (bounds.size.width.as_f32() - SCREEN_INSET * 2.0).max(76.0);
         let width = natural_width(&slots, &providers, max_width);
         let x_offset = (*state.0.x_offset.borrow()).clamp(0.0, (max_width - width).max(0.0));
@@ -1668,23 +1673,19 @@ fn pointer_is_over_menu() -> bool {
 #[cfg(target_os = "windows")]
 fn configure_native_details() {
     use windows::core::BOOL;
-    use windows::Win32::Foundation::{HWND, LPARAM, RECT};
+    use windows::Win32::Foundation::{HWND, LPARAM};
     use windows::Win32::System::Threading::GetCurrentProcessId;
     use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW,
-        GetWindowThreadProcessId, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, HWND_TOPMOST,
-        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-        WS_EX_TRANSPARENT,
+        EnumWindows, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowThreadProcessId,
+        SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE,
+        SWP_NOSIZE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
     };
 
     unsafe extern "system" fn each(hwnd: HWND, raw: LPARAM) -> BOOL {
         let pid = raw.0 as u32;
         let mut owner = 0u32;
         unsafe { GetWindowThreadProcessId(hwnd, Some(&mut owner)) };
-        let mut rect = RECT::default();
-        let is_details = unsafe { GetWindowRect(hwnd, &mut rect) }.is_ok()
-            && !is_bar_height(f64::from(rect.bottom - rect.top));
-        if owner == pid && unsafe { GetWindowTextLengthW(hwnd) } == 0 && is_details {
+        if owner == pid && unsafe { GetWindowTextLengthW(hwnd) } == 0 && !is_bar_window(hwnd) {
             let style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
             let style = style | WS_EX_TRANSPARENT.0 | WS_EX_NOACTIVATE.0 | WS_EX_TOOLWINDOW.0;
             unsafe {
@@ -1710,8 +1711,103 @@ fn configure_native_details() {
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn configure_native_details() {}
 
+/// The area panels sit on. Windows keeps them above the taskbar, which would
+/// otherwise cover them; macOS panels stay on the screen edge.
+fn panel_area(display: &dyn gpui::PlatformDisplay) -> Bounds<Pixels> {
+    if cfg!(target_os = "windows") {
+        display.visible_bounds()
+    } else {
+        display.bounds()
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn is_bar_height(height: f64) -> bool {
     (height - f64::from(BAR_HEIGHT)).abs() < 1.0
+}
+
+/// GPUI is per-monitor DPI aware: native rectangles are physical pixels while
+/// `BAR_HEIGHT` and the panel offset are logical pixels.
+#[cfg(target_os = "windows")]
+fn window_scale(hwnd: windows::Win32::Foundation::HWND) -> f64 {
+    use windows::Win32::UI::HiDpi::GetDpiForWindow;
+    match unsafe { GetDpiForWindow(hwnd) } {
+        0 => 1.0,
+        dpi => f64::from(dpi) / 96.0,
+    }
+}
+
+/// GPUI creates pop-ups as overlapped windows, and Windows then refuses a height
+/// below its minimum (30 logical pixels of client area at 150%) until `pin_bar`
+/// makes them borderless. No details window is that short.
+#[cfg(target_os = "windows")]
+const MAX_UNPINNED_BAR_HEIGHT: f64 = 40.0;
+
+/// `GetWindowRect` includes the invisible frame; only the client area is the bar.
+#[cfg(target_os = "windows")]
+fn is_bar_window(hwnd: windows::Win32::Foundation::HWND) -> bool {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
+    let mut client = RECT::default();
+    if unsafe { GetClientRect(hwnd, &mut client) }.is_err() {
+        return false;
+    }
+    let height = f64::from(client.bottom - client.top) / window_scale(hwnd);
+    height > 0.0 && height < MAX_UNPINNED_BAR_HEIGHT
+}
+
+/// Make the bar borderless and put it on the work area, above other windows.
+#[cfg(target_os = "windows")]
+fn pin_bar(
+    hwnd: windows::Win32::Foundation::HWND,
+    work_area: &windows::Win32::Foundation::RECT,
+    x_offset: f64,
+) {
+    use std::sync::atomic::Ordering;
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SendMessageW, SetWindowLongPtrW, SetWindowPos, GWL_STYLE, HWND_TOPMOST,
+        SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WM_SETTINGCHANGE,
+        WS_CAPTION, WS_POPUP,
+    };
+
+    let scale = window_scale(hwnd);
+    let height = (f64::from(BAR_HEIGHT) * scale).round() as i32;
+    let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } as u32;
+    if style & WS_CAPTION.0 != 0 {
+        unsafe {
+            SetWindowLongPtrW(
+                hwnd,
+                GWL_STYLE,
+                ((style & !WS_CAPTION.0) | WS_POPUP.0) as isize,
+            );
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+            // GPUI adds its cached frame size to every resize and only refreshes
+            // that cache on a settings change. The frame no longer exists. This
+            // runs off the UI thread, so the send waits for the event loop.
+            SendMessageW(hwnd, WM_SETTINGCHANGE, Some(WPARAM(1)), Some(LPARAM(0)));
+        }
+        BARS_NEED_LAYOUT.store(true, Ordering::Relaxed);
+    }
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            work_area.left + (x_offset * scale).round() as i32,
+            work_area.bottom - height,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1765,7 +1861,7 @@ fn pointer_is_over_native_panel() -> bool {
         if owner == context.pid
             && unsafe { GetWindowTextLengthW(hwnd) } == 0
             && unsafe { GetWindowRect(hwnd, &mut rect) }.is_ok()
-            && is_bar_height(f64::from(rect.bottom - rect.top))
+            && is_bar_window(hwnd)
             && context.pointer.x >= rect.left
             && context.pointer.x <= rect.right
             && context.pointer.y >= rect.top
@@ -1803,14 +1899,14 @@ fn configure_native_panels(_x_offset: f32) {}
 fn move_native_panels(_x_offset: f32) {}
 
 #[cfg(target_os = "windows")]
-fn configure_native_panels(_x_offset: f32) {
+fn configure_native_panels(x_offset: f32) {
     use windows::core::BOOL;
-    use windows::Win32::Foundation::{HWND, LPARAM, RECT};
+    use windows::Win32::Foundation::{HWND, LPARAM};
     use windows::Win32::System::Threading::GetCurrentProcessId;
     use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW,
-        GetWindowThreadProcessId, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, HWND_TOPMOST,
-        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+        EnumWindows, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowThreadProcessId,
+        SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE,
+        SWP_NOSIZE, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
     };
     #[repr(C)]
     struct Context {
@@ -1821,10 +1917,8 @@ fn configure_native_panels(_x_offset: f32) {
         let context = unsafe { &mut *(raw.0 as *mut Context) };
         let mut owner = 0u32;
         unsafe { GetWindowThreadProcessId(hwnd, Some(&mut owner)) };
-        let mut rect = RECT::default();
-        let is_bar = unsafe { GetWindowRect(hwnd, &mut rect) }.is_ok()
-            && is_bar_height(f64::from(rect.bottom - rect.top));
-        if owner == context.pid && unsafe { GetWindowTextLengthW(hwnd) } == 0 && is_bar {
+        if owner == context.pid && unsafe { GetWindowTextLengthW(hwnd) } == 0 && is_bar_window(hwnd)
+        {
             let style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
             let style = if context.seen == 0 {
                 (style | WS_EX_APPWINDOW.0) & !WS_EX_TOOLWINDOW.0
@@ -1852,59 +1946,58 @@ fn configure_native_panels(_x_offset: f32) {
         seen: 0,
     };
     let _ = unsafe { EnumWindows(Some(each), LPARAM((&mut context as *mut Context) as isize)) };
+    move_native_panels(x_offset);
 }
 
 #[cfg(target_os = "windows")]
 fn move_native_panels(x_offset: f32) {
+    // SetWindowPos delivers WM_SIZE synchronously on the calling thread, which
+    // would re-enter GPUI during an update. From another thread the message
+    // waits for the event loop.
+    let result = std::thread::Builder::new()
+        .name("agentsmon-pin-bars".into())
+        .spawn(move || pin_bars(x_offset));
+    if let Err(error) = result {
+        tracing::warn!(%error, "cannot place the bars");
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn pin_bars(x_offset: f32) {
     use windows::core::BOOL;
-    use windows::Win32::Foundation::{HWND, LPARAM, RECT};
+    use windows::Win32::Foundation::{HWND, LPARAM};
     use windows::Win32::Graphics::Gdi::{
         GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
     };
     use windows::Win32::System::Threading::GetCurrentProcessId;
     use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowRect, GetWindowTextLengthW, GetWindowThreadProcessId, SetWindowPos,
-        HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOSIZE,
+        EnumWindows, GetWindowTextLengthW, GetWindowThreadProcessId,
     };
     #[repr(C)]
     struct Context {
         pid: u32,
-        offset: i32,
+        offset: f64,
     }
     unsafe extern "system" fn each(hwnd: HWND, raw: LPARAM) -> BOOL {
         let context = unsafe { &mut *(raw.0 as *mut Context) };
         let mut owner = 0u32;
         unsafe { GetWindowThreadProcessId(hwnd, Some(&mut owner)) };
-        if owner == context.pid && unsafe { GetWindowTextLengthW(hwnd) } == 0 {
-            let mut rect = RECT::default();
-            if unsafe { GetWindowRect(hwnd, &mut rect) }.is_ok()
-                && is_bar_height(f64::from(rect.bottom - rect.top))
-            {
-                let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
-                let mut info = MONITORINFO {
-                    cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-                    ..Default::default()
-                };
-                if unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
-                    unsafe {
-                        let _ = SetWindowPos(
-                            hwnd,
-                            Some(HWND_TOPMOST),
-                            info.rcWork.left + context.offset,
-                            rect.top,
-                            0,
-                            0,
-                            SWP_NOSIZE | SWP_NOACTIVATE,
-                        );
-                    }
-                }
+        if owner == context.pid && unsafe { GetWindowTextLengthW(hwnd) } == 0 && is_bar_window(hwnd)
+        {
+            let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+            let mut info = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            if unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
+                pin_bar(hwnd, &info.rcWork, context.offset);
             }
         }
         BOOL(1)
     }
     let mut context = Context {
         pid: unsafe { GetCurrentProcessId() },
-        offset: x_offset.round() as i32,
+        offset: f64::from(x_offset),
     };
     let _ = unsafe { EnumWindows(Some(each), LPARAM((&mut context as *mut Context) as isize)) };
 }

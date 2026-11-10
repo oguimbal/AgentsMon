@@ -40,9 +40,11 @@ impl NativeNotifications {
 
         match notification.show() {
             Ok(handle) => {
-                self.delivered
-                    .borrow_mut()
-                    .insert(snapshot.id.clone(), handle.id());
+                if let Some(notification_id) = delivered_id(&handle) {
+                    self.delivered
+                        .borrow_mut()
+                        .insert(snapshot.id.clone(), notification_id);
+                }
                 let id = snapshot.id.clone();
                 let clicked = self.clicked_tx.clone();
                 let _ = std::thread::Builder::new()
@@ -79,7 +81,7 @@ impl NativeNotifications {
             .show()
         {
             Ok(handle) => {
-                *self.diagnostic.borrow_mut() = Some(handle.id());
+                *self.diagnostic.borrow_mut() = delivered_id(&handle);
                 let clicked = self.clicked_tx.clone();
                 let result = std::thread::Builder::new().name("agentsmon-diagnostic-notification".into()).spawn(move || {
                     let _ = handle.wait_for_response(move |response: &NotificationResponse| {
@@ -104,6 +106,18 @@ impl NativeNotifications {
         };
         close_native(notification_id);
     }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn delivered_id(handle: &notify_rust::NotificationHandle) -> Option<NotificationId> {
+    Some(handle.id())
+}
+
+/// Windows toasts have no identifier: notify-rust cannot remove them from history
+/// and does not export their handle type.
+#[cfg(target_os = "windows")]
+fn delivered_id<Handle>(_handle: &Handle) -> Option<NotificationId> {
+    None
 }
 
 #[cfg(target_os = "macos")]

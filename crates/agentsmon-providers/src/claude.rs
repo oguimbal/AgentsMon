@@ -9,8 +9,10 @@ use std::io::Write;
 #[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
 
+#[cfg(any(target_os = "macos", test))]
+use agentsmon_core::UsageLimit;
 use agentsmon_core::{
-    AgentId, AgentSnapshot, AgentState, ContextUsage, FocusTarget, ProviderUsage, UsageLimit,
+    AgentId, AgentSnapshot, AgentState, ContextUsage, FocusTarget, ProviderUsage,
 };
 #[cfg(target_os = "macos")]
 use anyhow::bail;
@@ -418,12 +420,14 @@ fn prefer_agentsmon_records(
         .collect()
 }
 
+#[cfg(any(target_os = "macos", test))]
 #[derive(Debug, Deserialize)]
 struct ClaudeUsageResponse {
     #[serde(default)]
     limits: Vec<ClaudeUsageLimit>,
 }
 
+#[cfg(any(target_os = "macos", test))]
 #[derive(Debug, Deserialize)]
 struct ClaudeUsageLimit {
     kind: String,
@@ -435,12 +439,14 @@ struct ClaudeUsageLimit {
     scope: Option<ClaudeUsageScope>,
 }
 
+#[cfg(any(target_os = "macos", test))]
 #[derive(Debug, Deserialize)]
 struct ClaudeUsageScope {
     #[serde(default)]
     model: Option<ClaudeUsageModel>,
 }
 
+#[cfg(any(target_os = "macos", test))]
 #[derive(Debug, Deserialize)]
 struct ClaudeUsageModel {
     #[serde(default)]
@@ -521,6 +527,7 @@ fn fetch_claude_usage() -> Result<Option<ProviderUsage>> {
     Ok(None)
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn provider_usage_from_api(response: ClaudeUsageResponse) -> Option<ProviderUsage> {
     let limits = response
         .limits
@@ -769,7 +776,16 @@ mod tests {
 
     #[test]
     fn builds_supported_desktop_focus_uris() {
-        let cwd = Path::new("/tmp/project with spaces");
+        #[cfg(not(target_os = "windows"))]
+        let (cwd, path) = (
+            Path::new("/tmp/project with spaces"),
+            "tmp/project%20with%20spaces/",
+        );
+        #[cfg(target_os = "windows")]
+        let (cwd, path) = (
+            Path::new(r"C:\tmp\project with spaces"),
+            "C:/tmp/project%20with%20spaces/",
+        );
         let vscode = focus_uri(
             None,
             Some("/Applications/Visual Studio Code.app/Contents/MacOS/Electron"),
@@ -777,11 +793,11 @@ mod tests {
             "session",
         )
         .unwrap();
-        assert_eq!(vscode, "vscode://file/tmp/project%20with%20spaces/");
+        assert_eq!(vscode, format!("vscode://file/{path}"));
         // VSCode's integrated terminal reports TERM_PROGRAM=vscode.
         assert_eq!(
             focus_uri(Some("vscode"), None, cwd, "session").as_deref(),
-            Some("vscode://file/tmp/project%20with%20spaces/")
+            Some(format!("vscode://file/{path}").as_str())
         );
         // Cursor reports TERM_PROGRAM=vscode too; the detected executable wins.
         assert_eq!(
@@ -792,7 +808,7 @@ mod tests {
                 "session"
             )
             .as_deref(),
-            Some("cursor://file/tmp/project%20with%20spaces/")
+            Some(format!("cursor://file/{path}").as_str())
         );
         assert_eq!(
             focus_uri(
