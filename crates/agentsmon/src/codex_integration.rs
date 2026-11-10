@@ -199,14 +199,19 @@ fn contains_owned_command(value: &Value) -> bool {
 }
 
 fn codex_available() -> bool {
-    codex_executable().is_some_and(|executable| {
-        Command::new(executable)
-            .arg("--version")
-            .output()
-            .is_ok_and(|output| output.status.success())
-    })
+    codex_executable().is_some()
 }
 
+fn runs(executable: &Path) -> bool {
+    Command::new(executable)
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+/// The first Codex that answers `--version`. A `codex` earlier on `PATH` can
+/// be a leftover that no longer starts (an npm shim whose binary is gone)
+/// while the desktop application ships a working one.
 fn codex_executable() -> Option<PathBuf> {
     let names: &[&str] = if cfg!(target_os = "windows") {
         &["codex.exe", "codex.cmd", "codex"]
@@ -251,7 +256,9 @@ fn codex_executable() -> Option<PathBuf> {
             );
         }
     }
-    candidates.into_iter().find(|candidate| candidate.is_file())
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.is_file() && runs(candidate))
 }
 
 fn hooks_path() -> PathBuf {

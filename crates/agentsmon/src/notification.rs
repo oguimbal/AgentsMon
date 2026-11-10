@@ -21,7 +21,12 @@ pub enum NotificationClick {
 impl NativeNotifications {
     pub fn new() -> Self {
         let (clicked_tx, clicked_rx) = crossbeam_channel::bounded(32);
-        request_authorization();
+        // macOS answers only once the user has dealt with its permission
+        // prompt (first launch): waiting here would keep the bars and the
+        // integration setup from starting.
+        let _ = std::thread::Builder::new()
+            .name("agentsmon-notification-auth".into())
+            .spawn(request_authorization);
         Self {
             clicked_tx,
             clicked_rx,
