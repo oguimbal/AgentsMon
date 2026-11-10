@@ -31,7 +31,7 @@ dependencies = [
 
 [[package]]
 name = "agentsmon"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "agentsmon-core",
  "agentsmon-providers",
@@ -60,14 +60,14 @@ dependencies = [
 
 [[package]]
 name = "agentsmon-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "agentsmon-helper"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "agentsmon-core",
  "agentsmon-providers",
@@ -85,7 +85,7 @@ dependencies = [
 
 [[package]]
 name = "agentsmon-providers"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "agentsmon-core",
  "anyhow",
@@ -113,7 +113,7 @@ dependencies = [
 
 [[package]]
 name = "agentsmon-ui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "agentsmon-core",
  "gpui",
