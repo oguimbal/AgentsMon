@@ -24,7 +24,7 @@ impl Render for DiagnosticReportView {
         div().flex().flex_col().size_full().p_5().gap_3()
             .bg(rgb(0x1c1d21)).text_color(rgb(0xe8e8ea)).text_sm()
             .child(div().text_lg().font_weight(gpui::FontWeight::SEMIBOLD).child(self.title.clone()))
-            .child(div().text_color(rgb(0xb9bbc3)).child("Copiez ce rapport dans une demande de correction. Il reste disponible dans le menu Diagnostic des connexions."))
+            .child(div().text_color(rgb(0xb9bbc3)).child("Copy this report into a fix request. It stays available in the Connection diagnostics menu."))
             .child(div().id("connection-diagnostic-text").flex_1().min_h_0().overflow_y_scroll()
                 .p_3().rounded_sm().bg(rgb(0x25262c)).text_size(px(12.0))
                 .children(self.report.lines().map(|line| div().min_h(px(17.0)).child(line.to_owned()))))
@@ -36,7 +36,7 @@ impl Render for DiagnosticReportView {
                         view.copied = true;
                         cx.notify();
                     }))
-                    .child(if self.copied { "Prompt copié" } else { "Copier le prompt de diagnostic" })
+                    .child(if self.copied { "Prompt copied" } else { "Copy diagnostic prompt" })
             ))
     }
 }

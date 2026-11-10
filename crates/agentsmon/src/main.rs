@@ -32,9 +32,9 @@ static BARS_NEED_LAYOUT: std::sync::atomic::AtomicBool = std::sync::atomic::Atom
 const SCREEN_INSET: f32 = 0.0;
 const DETAILS_WIDTH: f32 = 400.0;
 const DETAILS_GAP: f32 = 6.0;
-const RENAME_WINDOW_TITLE: &str = "Renommer la conversation";
-const MENU_WINDOW_TITLE: &str = "Conversations du groupe";
-const ACTIONS_WINDOW_TITLE: &str = "Actions des providers";
+const RENAME_WINDOW_TITLE: &str = "Rename conversation";
+const MENU_WINDOW_TITLE: &str = "Group conversations";
+const ACTIONS_WINDOW_TITLE: &str = "Provider actions";
 const ACTIONS_MENU_WIDTH: f32 = 200.0;
 /// How long the pointer may be outside both a group card and its menu before
 /// the menu closes; covers the travel between the two.
@@ -167,14 +167,14 @@ fn main() {
         let connection_state = state.clone();
         cx.on_action(move |_: &ConnectionDiagnostics, cx| {
             let report = connection_state.0.connection_diagnostics.borrow().current_prompt();
-            open_connection_report(cx, &connection_state, "Diagnostic des connexions".into(), report);
+            open_connection_report(cx, &connection_state, "Connection diagnostics".into(), report);
         });
         cx.set_menus([Menu::new("AgentsMon").items([
-            MenuItem::action("Afficher les barres", ShowBars),
-            MenuItem::action("Diagnostic Claude…", Diagnostics),
-            MenuItem::action("Diagnostic des connexions…", ConnectionDiagnostics),
+            MenuItem::action("Show bars", ShowBars),
+            MenuItem::action("Claude diagnostics…", Diagnostics),
+            MenuItem::action("Connection diagnostics…", ConnectionDiagnostics),
             MenuItem::separator(),
-            MenuItem::action("Quitter AgentsMon", Quit),
+            MenuItem::action("Quit AgentsMon", Quit),
         ])]);
 
         refresh(&state, cx);
@@ -235,7 +235,7 @@ fn ensure_integrations(cx: &mut App) {
 fn open_codex_approval(cx: &mut App) {
     let options = WindowOptions {
         titlebar: Some(gpui::TitlebarOptions {
-            title: Some("Autoriser Codex".into()),
+            title: Some("Allow Codex".into()),
             appears_transparent: false,
             traffic_light_position: None,
         }),
@@ -1321,7 +1321,7 @@ fn open_diagnostics(cx: &mut App, state: &AppState) {
     let state_for_event = state.clone();
     let options = WindowOptions {
         titlebar: Some(gpui::TitlebarOptions {
-            title: Some("Intégration Claude".into()),
+            title: Some("Claude integration".into()),
             appears_transparent: false,
             traffic_light_position: None,
         }),
@@ -1359,7 +1359,7 @@ fn open_diagnostics(cx: &mut App, state: &AppState) {
                 if let Err(error) = result {
                     tracing::error!(%error, "Claude integration action failed");
                     diagnostics.update(cx, |view, cx| {
-                        view.set_message(format!("Échec : {error:#}"), cx);
+                        view.set_message(format!("Failed: {error:#}"), cx);
                     });
                     return;
                 }

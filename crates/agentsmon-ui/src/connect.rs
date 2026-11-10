@@ -253,7 +253,7 @@ impl ConnectView {
                                     .text_size(px(11.0))
                                     .child(command),
                             )
-                            .child(button("copy-command", "Copier", false).on_click(
+                            .child(button("copy-command", "Copy", false).on_click(
                                 move |_, _, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(
                                         copied.clone(),
@@ -265,7 +265,7 @@ impl ConnectView {
                 .when(waiting, |status| {
                     status.child(
                         div().flex().child(
-                            button("retry", "Réessayer maintenant", false)
+                            button("retry", "Retry now", false)
                                 .on_click(cx.listener(|_, _, _, cx| cx.emit(ConnectEvent::Retry))),
                         ),
                     )
@@ -312,7 +312,7 @@ impl Render for ConnectView {
                             .on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
                     )
                     .child(
-                        button("cancel", "Annuler", false)
+                        button("cancel", "Cancel", false)
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(ConnectEvent::Cancel))),
                     ),
             )

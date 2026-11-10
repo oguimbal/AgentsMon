@@ -75,13 +75,13 @@ impl Registry {
             ProviderDiagnostic {
             code,
             summary,
-            details: format!("Source : {}\nPID : {pid}\nLecture bornée à {MAX_BYTES} octets.\nRepli : derniers hooks Claude connus.\nDocumentation : docs/claude-session-status.md", path.display()),
+            details: format!("Source: {}\nPID: {pid}\nRead capped at {MAX_BYTES} bytes.\nFallback: last known Claude hooks.\nDocumentation: docs/claude-session-status.md", path.display()),
         }
         };
         let invalid = || {
             issue(
                 "claude.registry.schema",
-                "Le format du registre de sessions Claude est incompatible ou incomplet.",
+                "The Claude session registry format is incompatible or incomplete.",
             )
         };
         // Refuse symlinks, directories, pipes and devices. O_NOFOLLOW also
@@ -93,14 +93,14 @@ impl Registry {
             Err(_) => {
                 return Err(issue(
                     "claude.registry.read",
-                    "Le registre de sessions Claude est illisible.",
+                    "The Claude session registry cannot be read.",
                 ))
             }
         };
         if !metadata.is_file() || metadata.len() > MAX_BYTES {
             return Err(issue(
                 "claude.registry.file",
-                "Le fichier de statut Claude n’est pas un fichier régulier de taille acceptée.",
+                "The Claude status file is not a regular file of an accepted size.",
             ));
         }
         let mut options = OpenOptions::new();
@@ -119,15 +119,16 @@ impl Registry {
             file.take(MAX_BYTES + 1).read_to_end(&mut bytes)?;
             Ok(bytes)
         };
-        let bytes =
-            match read() {
-                Ok(bytes) if bytes.len() as u64 <= MAX_BYTES => bytes,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-                _ => return Err(issue(
+        let bytes = match read() {
+            Ok(bytes) if bytes.len() as u64 <= MAX_BYTES => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            _ => {
+                return Err(issue(
                     "claude.registry.read",
-                    "Le registre de sessions Claude est illisible ou dépasse la taille acceptée.",
-                )),
-            };
+                    "The Claude session registry cannot be read or exceeds the accepted size.",
+                ))
+            }
+        };
         // Serde errors can echo input values. Return only a fixed error code.
         let record: RuntimeRecord = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
         if record.pid != pid || record.session_id != session_id {
@@ -152,7 +153,7 @@ impl Registry {
             if hook.state == AgentState::Idle {
                 return Ok(None);
             }
-            let mut diagnostic = issue("claude.registry.status_unavailable", "Cette session Claude ne publie pas son état courant. Relancez-la avec une version récente de Claude Code.");
+            let mut diagnostic = issue("claude.registry.status_unavailable", "This Claude session does not publish its current state. Restart it with a recent version of Claude Code.");
             // Version is useful for mixed running installations, but it is an
             // untrusted field. Never include arbitrary source strings in logs.
             if let Some(version) = record
@@ -161,7 +162,7 @@ impl Registry {
             {
                 diagnostic
                     .details
-                    .push_str(&format!("\nVersion du processus Claude : {version}"));
+                    .push_str(&format!("\nClaude process version: {version}"));
             }
             return Err(diagnostic);
         };
@@ -178,7 +179,7 @@ impl Registry {
             _ => {
                 return Err(issue(
                     "claude.registry.status",
-                    "Claude publie une valeur de statut inconnue.",
+                    "Claude publishes an unknown status value.",
                 ))
             }
         };
@@ -186,7 +187,7 @@ impl Registry {
         if timestamp < started || timestamp > now + Duration::from_secs(2) {
             return Err(issue(
                 "claude.registry.timestamp",
-                "Les horodatages du statut Claude sont incohérents.",
+                "The Claude status timestamps are inconsistent.",
             ));
         }
         // A new prompt/hook beats an old registry idle, except a subagent

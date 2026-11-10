@@ -127,7 +127,7 @@ impl ConnectionDiagnostics {
 
     pub fn current_prompt(&self) -> String {
         if self.saved.reports.is_empty() {
-            return format!("Aucun incident de connexion enregistré.\nAgentsMon {} — {} / {}\nLogs : {}\nL’absence d’incident ne garantit pas une connexion active. Un registre Claude absent, Codex arrêté, les tâches sans propriétaire desktop et Codex sur Windows utilisent les hooks.\n", env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH, self.log_path());
+            return format!("No connection incident recorded.\nAgentsMon {} — {} / {}\nLogs: {}\nNo incident does not mean a connection is active. A missing Claude registry, a stopped Codex, tasks without a desktop owner and Codex on Windows use the hooks.\n", env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH, self.log_path());
         }
         self.saved
             .reports
@@ -138,14 +138,14 @@ impl ConnectionDiagnostics {
     }
 
     fn prompt(&self, report: &Report) -> String {
-        format!("Diagnostique et corrige le suivi des états dans AgentsMon pour {}.\nConsulte d’abord docs/codex-desktop-ipc.md pour Codex ou docs/claude-session-status.md pour Claude : ces documents décrivent les formats, les investigations, les protections et les tests.\nPréserve le repli sur les hooks et ne décode aucun contenu de conversation.\n\nAgentsMon : {}\nPlateforme : {} / {}\nIncident : {}\n{}\nPremière observation : {}\nDernière observation enregistrée : {}\nIncident non signalé depuis : {}\n\n{}\nJournal persistant : {}\nJournal précédent : {}.1\nRapport et limite de notifications : {}\n\nCes détails contiennent uniquement des métadonnées techniques. Aucune autorisation n’a été acceptée ou refusée par AgentsMon.\n", report.provider, env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH, report.code, report.summary, timestamp(report.first_seen_ms), timestamp(report.last_seen_ms), report.cleared_ms.map(timestamp).unwrap_or_else(|| "incident encore signalé à la dernière observation".into()), report.details, self.log_path(), self.log_path(), self.root.as_ref().map(|p| p.join("provider-diagnostics.json").display().to_string()).unwrap_or_else(|| "indisponible".into()))
+        format!("Diagnose and fix state tracking in AgentsMon for {}.\nRead docs/codex-desktop-ipc.md for Codex or docs/claude-session-status.md for Claude first: these documents describe the formats, the investigations, the safeguards and the tests.\nKeep the hook fallback and decode no conversation content.\n\nAgentsMon: {}\nPlatform: {} / {}\nIncident: {}\n{}\nFirst seen: {}\nLast recorded observation: {}\nIncident no longer reported since: {}\n\n{}\nPersistent log: {}\nPrevious log: {}.1\nReport and notification limit: {}\n\nThese details contain technical metadata only. AgentsMon accepted or refused no permission.\n", report.provider, env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH, report.code, report.summary, timestamp(report.first_seen_ms), timestamp(report.last_seen_ms), report.cleared_ms.map(timestamp).unwrap_or_else(|| "incident still reported at the last observation".into()), report.details, self.log_path(), self.log_path(), self.root.as_ref().map(|p| p.join("provider-diagnostics.json").display().to_string()).unwrap_or_else(|| "unavailable".into()))
     }
 
     fn log_path(&self) -> String {
         self.root
             .as_ref()
             .map(|p| p.join("provider-diagnostics.log").display().to_string())
-            .unwrap_or_else(|| "indisponible".into())
+            .unwrap_or_else(|| "unavailable".into())
     }
 
     fn log(&self, event: &str, report: &Report, now: u64) {

@@ -411,8 +411,8 @@ fn archived_session_id_from_path(path: &Path) -> Option<String> {
 
 fn provider_usage(rate_limits: &CodexRateLimits) -> Option<ProviderUsage> {
     let limits = [
-        ("Fenêtre principale", rate_limits.primary.as_ref()),
-        ("Fenêtre secondaire", rate_limits.secondary.as_ref()),
+        ("Primary window", rate_limits.primary.as_ref()),
+        ("Secondary window", rate_limits.secondary.as_ref()),
     ]
     .into_iter()
     .filter_map(|(label, window)| {

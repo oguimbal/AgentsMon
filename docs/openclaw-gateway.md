@@ -1,85 +1,85 @@
-# OpenClaw : suivi des sessions par la Gateway
+# OpenClaw: session tracking through the Gateway
 
-AgentsMon suit les sessions OpenClaw en **lecture seule** au travers du
-WebSocket de la Gateway (protocole v4), généralement distante. Référence :
-dépôt `openclaw/openclaw`, version 2026.9.7 (commit `e1b701b4`, 30 septembre
-2026), `docs/gateway/clients.md`, `docs/gateway/protocol/*.md` et
-`packages/gateway-protocol`. Le protocole évolue vite : relire ces sources
-avant de toucher au client et ne pas accepter une autre version de protocole
-sans tests.
+AgentsMon tracks OpenClaw sessions **read-only** through the
+Gateway's WebSocket (protocol v4), which is usually remote. Reference:
+`openclaw/openclaw` repository, version 2026.9.7 (commit `e1b701b4`, 30 September
+2026), `docs/gateway/clients.md`, `docs/gateway/protocol/*.md` and
+`packages/gateway-protocol`. The protocol changes quickly: re-read these sources
+before touching the client and do not accept another protocol version
+without tests.
 
-## Connexion et appairage
+## Connection and pairing
 
-1. Clic droit sur les icônes des providers → « Connecter OpenClaw… » (proposé
-   tant qu'OpenClaw n'a pas d'identifiant valide : jamais configuré, refusé ou
-   appairage en attente ; une simple coupure réseau ne compte pas).
-2. L'utilisateur saisit l'URL de l'interface web (`http(s)://hote:18789/`,
-   chemin de base compris) et le **token partagé** de la Gateway. Ce token reste
-   en mémoire le temps de l'appairage et n'est jamais écrit sur disque.
-3. AgentsMon signe le défi `connect.challenge` avec sa clé Ed25519 (charge
+1. Right-click the provider icons → "Connect OpenClaw…" (offered
+   as long as OpenClaw has no valid credential: never configured, refused or
+   pairing pending; a mere network drop does not count).
+2. The user enters the URL of the web interface (`http(s)://host:18789/`,
+   base path included) and the Gateway's **shared token**. This token stays
+   in memory for the duration of pairing and is never written to disk.
+3. AgentsMon signs the `connect.challenge` challenge with its Ed25519 key (payload
    `v3|deviceId|cli|cli|operator|operator.read|signedAt|token|nonce|darwin|`),
    `client.id = "cli"`, `mode = "cli"`, `displayName = "AgentsMon"`.
-4. Une Gateway distante répond `PAIRING_REQUIRED` avec un `requestId`. La
-   fenêtre affiche `openclaw devices approve <requestId>` et réessaie toutes
-   les 3 s (la Gateway garde le même `requestId` tant que clé, rôle et scopes
-   ne changent pas), sauf si `pauseReconnect` est vrai. Abandon après 15 min.
-5. Une fois approuvé, `hello-ok.auth.deviceToken` est enregistré ; sans lui,
-   l'appairage échoue (`no-device-token`), car le token partagé n'est pas
-   conservé. L'URL est alors écrite dans `openclaw.json`.
+4. A remote Gateway replies `PAIRING_REQUIRED` with a `requestId`. The
+   window displays `openclaw devices approve <requestId>` and retries every
+   3 s (the Gateway keeps the same `requestId` as long as key, role and scopes
+   do not change), unless `pauseReconnect` is true. Gives up after 15 min.
+5. Once approved, `hello-ok.auth.deviceToken` is saved; without it,
+   pairing fails (`no-device-token`), because the shared token is not
+   kept. The URL is then written to `openclaw.json`.
 
-Fichiers du dossier de données (`~/Library/Application Support/com.oliv.AgentsMon`) :
+Files in the data directory (`~/Library/Application Support/fr.gmbl.AgentsMon`):
 
-| Fichier | Contenu | Droits |
+| File | Content | Permissions |
 | --- | --- | --- |
-| `openclaw.json` | `{"url": …}`, éventuellement `recentHours` ; un `token`/`password` écrit à la main est accepté | 0600 |
-| `openclaw-device.json` | clé secrète Ed25519 et jetons d'appareil par origine de Gateway | 0600 |
+| `openclaw.json` | `{"url": …}`, optionally `recentHours`; a hand-written `token`/`password` is accepted | 0600 |
+| `openclaw-device.json` | Ed25519 secret key and device tokens per Gateway origin | 0600 |
 
-`OPENCLAW_GATEWAY_URL`, `OPENCLAW_GATEWAY_TOKEN` et `OPENCLAW_GATEWAY_PASSWORD`
-remplacent le fichier. Supprimer `openclaw.json` désactive le provider ;
-supprimer `openclaw-device.json` impose un nouvel appairage (révoquer l'ancien
-appareil avec `openclaw devices`).
+`OPENCLAW_GATEWAY_URL`, `OPENCLAW_GATEWAY_TOKEN` and `OPENCLAW_GATEWAY_PASSWORD`
+override the file. Deleting `openclaw.json` disables the provider;
+deleting `openclaw-device.json` forces a new pairing (revoke the old
+device with `openclaw devices`).
 
-## Ce qui est lu, et ce qui ne l'est jamais
+## What is read, and what never is
 
-- Scope demandé : `operator.read` seulement. Capacité annoncée :
-  `session-scoped-events`, pour que les flux `chat`/`agent`/`session.tool` ne
-  soient jamais poussés. Aucun abonnement (`sessions.subscribe` enverrait
-  `session.message`, avec le texte des messages).
-- Toutes les 3 s : `sessions.list` avec `sortBy: "activity"`,
-  `activeMinutes` (24 h par défaut), `excludeCron`, `excludeSystem`,
-  `excludeSubagents`, `requireLastInteraction`, 24 lignes au plus, **sans**
-  `includeDerivedTitles`, `includeLastMessage` ni `includeActivitySummary`.
-- Champs décodés : `key`, `agentId`, `label`, `displayName`, `updatedAt`,
+- Requested scope: `operator.read` only. Advertised capability:
+  `session-scoped-events`, so that the `chat`/`agent`/`session.tool` streams are
+  never pushed. No subscription (`sessions.subscribe` would send
+  `session.message`, with the message text).
+- Every 3 s: `sessions.list` with `sortBy: "activity"`,
+  `activeMinutes` (24 h by default), `excludeCron`, `excludeSystem`,
+  `excludeSubagents`, `requireLastInteraction`, 24 rows at most, **without**
+  `includeDerivedTitles`, `includeLastMessage` or `includeActivitySummary`.
+- Decoded fields: `key`, `agentId`, `label`, `displayName`, `updatedAt`,
   `lastActivityAt`, `hasActiveRun`, `status`, `totalTokens`,
-  `totalTokensFresh`, `contextTokens`. Jamais `derivedTitle`,
+  `totalTokensFresh`, `contextTokens`. Never `derivedTitle`,
   `lastMessagePreview`, `activitySummary`, `lastRunError`, `subject`,
-  `agentStatus` ni `observerDigest`.
-- `displayName` peut être un titre généré par OpenClaw à partir du premier
-  message, comme `ai-title` chez Claude ; `label` (nom saisi dans OpenClaw)
-  passe avant.
-- Les charges utiles d'événements ne sont jamais décodées, sauf le défi de
-  connexion. Les erreurs ne gardent que des codes (`error.details.code`,
-  `requestId`) ; `error.message` n'est pas lu. Ne jamais journaliser de trame
-  brute ni un token.
+  `agentStatus` or `observerDigest`.
+- `displayName` may be a title generated by OpenClaw from the first
+  message, like `ai-title` in Claude; `label` (name typed in OpenClaw)
+  takes precedence.
+- Event payloads are never decoded, except the connection
+  challenge. Errors keep only codes (`error.details.code`,
+  `requestId`); `error.message` is not read. Never log a raw
+  frame or a token.
 
-## Correspondance vers AgentsMon
+## Mapping to AgentsMon
 
 | AgentsMon | OpenClaw |
 | --- | --- |
-| identifiant | `key` de session (stable, contrairement à `sessionId`) |
-| dossier / groupe | `openclaw/<agentId>` : une carte par agent |
-| titre | `label`, sinon `displayName` |
-| actif | `hasActiveRun` ou `status` `running`/`queued` |
-| contexte | `totalTokens / contextTokens` si `totalTokensFresh` n'est pas faux |
-| clic | Control UI : `<url>/chat/<agentId>/…`, portage de `buildControlUiSessionPath` (`packages/session-url-contract`) sans le slug dérivé du titre |
+| identifier | session `key` (stable, unlike `sessionId`) |
+| directory / group | `openclaw/<agentId>`: one card per agent |
+| title | `label`, otherwise `displayName` |
+| active | `hasActiveRun` or `status` `running`/`queued` |
+| context | `totalTokens / contextTokens` if `totalTokensFresh` is not false |
+| click | Control UI: `<url>/chat/<agentId>/…`, port of `buildControlUiSessionPath` (`packages/session-url-contract`) without the title-derived slug |
 
-## Reprise et échecs
+## Recovery and failures
 
-- Réseau ou protocole : nouvelle tentative avec délai croissant (3 s à 60 s).
-- Identifiants refusés, appairage requis, refus de méthode : le worker **attend
-  une action de l'utilisateur**. La Gateway limite les échecs d'authentification
-  par IP, et une boucle bloquerait aussi le navigateur de l'utilisateur.
-- Seul `AUTH_DEVICE_TOKEN_MISMATCH` efface le jeton d'appareil stocké ; un
-  `DEVICE_AUTH_*` signale un défaut de la preuve (bug ou horloge) et le garde.
-- Le fil réseau ne tient jamais le verrou partagé pendant une entrée/sortie ;
-  le thread GPUI lit seulement l'état en cache.
+- Network or protocol: retry with an increasing delay (3 s to 60 s).
+- Credentials refused, pairing required, method refused: the worker **waits
+  for a user action**. The Gateway rate-limits authentication failures
+  per IP, and a loop would also block the user's browser.
+- Only `AUTH_DEVICE_TOKEN_MISMATCH` clears the stored device token; a
+  `DEVICE_AUTH_*` indicates a defect in the proof (bug or clock) and keeps it.
+- The network thread never holds the shared lock during I/O;
+  the GPUI thread only reads the cached state.

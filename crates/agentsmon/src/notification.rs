@@ -34,8 +34,8 @@ impl NativeNotifications {
         self.close(&snapshot.id);
         let mut notification = Notification::new();
         notification
-            .summary("Agent terminé")
-            .body(&format!("{} attend votre attention", snapshot.label()))
+            .summary("Agent finished")
+            .body(&format!("{} needs your attention", snapshot.label()))
             .timeout(Timeout::Milliseconds(8_000));
 
         match notification.show() {
@@ -70,10 +70,12 @@ impl NativeNotifications {
         if let Some(id) = self.diagnostic.borrow_mut().take() {
             close_native(id);
         }
-        let title = format!("Suivi {name} dégradé");
+        let title = format!("{name} tracking degraded");
         match Notification::new()
             .summary(&title)
-            .body("Le statut peut être incomplet. Cliquez pour ouvrir les détails et copier un prompt de diagnostic.")
+            .body(
+                "Status may be incomplete. Click to open the details and copy a diagnostic prompt.",
+            )
             // Keep the report reachable from Notification Center after the
             // banner disappears. mac-usernotifications treats a numeric timeout
             // as deletion + cancellation of the click handler, not banner TTL.
@@ -83,16 +85,28 @@ impl NativeNotifications {
             Ok(handle) => {
                 *self.diagnostic.borrow_mut() = delivered_id(&handle);
                 let clicked = self.clicked_tx.clone();
-                let result = std::thread::Builder::new().name("agentsmon-diagnostic-notification".into()).spawn(move || {
-                    let _ = handle.wait_for_response(move |response: &NotificationResponse| {
-                        if matches!(response, NotificationResponse::Default | NotificationResponse::Action(_)) {
-                            let _ = clicked.try_send(NotificationClick::Diagnostic { title: title.clone(), prompt: prompt.clone() });
-                        }
+                let result = std::thread::Builder::new()
+                    .name("agentsmon-diagnostic-notification".into())
+                    .spawn(move || {
+                        let _ = handle.wait_for_response(move |response: &NotificationResponse| {
+                            if matches!(
+                                response,
+                                NotificationResponse::Default | NotificationResponse::Action(_)
+                            ) {
+                                let _ = clicked.try_send(NotificationClick::Diagnostic {
+                                    title: title.clone(),
+                                    prompt: prompt.clone(),
+                                });
+                            }
+                        });
                     });
-                });
-                if let Err(error) = result { tracing::warn!(%error, "cannot listen for diagnostic notification click; report remains available in menu"); }
+                if let Err(error) = result {
+                    tracing::warn!(%error, "cannot listen for diagnostic notification click; report remains available in menu");
+                }
             }
-            Err(error) => tracing::warn!(%error, "diagnostic notification failed; report remains available in menu"),
+            Err(error) => {
+                tracing::warn!(%error, "diagnostic notification failed; report remains available in menu")
+            }
         }
     }
 

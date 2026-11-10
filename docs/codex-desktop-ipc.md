@@ -1,113 +1,113 @@
-# Codex desktop: états d’attente et diagnostic du protocole IPC
+# Codex desktop: wait states and IPC protocol diagnostics
 
-Ce document décrit une interface **interne**, constatée sur ChatGPT macOS
-**26.903.71938, build 8576**, avec son exécutable Codex **0.153.4**, le
-16 septembre 2026. Il ne constitue pas une garantie de compatibilité d’OpenAI.
-Ne pas augmenter une version acceptée sans vérifier le contrat et les tests.
+This document describes an **internal** interface, observed on ChatGPT macOS
+**26.903.71938, build 8576**, with its Codex executable **0.153.4**, on
+16 September 2026. It is not a compatibility guarantee from OpenAI.
+Do not raise an accepted version without checking the contract and the tests.
 
-## Pourquoi les hooks ne suffisent pas
+## Why hooks are not enough
 
-Le cas initial était une autorisation Computer Use : « Allow ChatGPT to use
-LeSwitcheurPreviewLight? ». Codex affichait « Awaiting approval » et AgentsMon
-restait vert. Pendant ce blocage, les vérifications indépendantes ont trouvé :
+The initial case was a Computer Use approval: "Allow ChatGPT to use
+LeSwitcheurPreviewLight?". Codex displayed "Awaiting approval" and AgentsMon
+stayed green. During this block, independent checks found:
 
 | Source | Observation |
 | --- | --- |
-| Record AgentsMon | `state=active`, `event=PreToolUse`, `activity=mcp__node_repl__js` |
-| Rollout | Dernière écriture à 18:45:23 UTC ; aucune progression pendant l’attente |
-| `node_repl/active_execs/*.json` | Exécution présente, mais aucun indicateur d’autorisation |
-| `logs_2.sqlite` | Dernier événement technique attribué à la tâche à 18:45:54 UTC ; aucun nouveau hook d’attente |
-| SQLite et état global du desktop | Aucun statut d’attente utilisable trouvé pour cette tâche |
-| IPC desktop, testé en direct | `threadRuntimeStatus={type:"active",activeFlags:["waitingOnApproval"]}` |
-| Métadonnées de demande, sonde d’investigation | `method=mcpServer/elicitation/request` |
-| Tâche témoin active | `activeFlags=[]`, aucune demande en attente |
+| AgentsMon record | `state=active`, `event=PreToolUse`, `activity=mcp__node_repl__js` |
+| Rollout | Last write at 18:45:23 UTC; no progress during the wait |
+| `node_repl/active_execs/*.json` | Execution present, but no approval indicator |
+| `logs_2.sqlite` | Last technical event attributed to the task at 18:45:54 UTC; no new waiting hook |
+| SQLite and desktop global state | No usable waiting status found for this task |
+| Desktop IPC, tested live | `threadRuntimeStatus={type:"active",activeFlags:["waitingOnApproval"]}` |
+| Request metadata, investigation probe | `method=mcpServer/elicitation/request` |
+| Active control task | `activeFlags=[]`, no pending request |
 
-La sonde d’intégration a ensuite retrouvé `idle`, en accord avec le hook `Stop`
-de la tâche après sa reprise/fin. Il ne faut donc pas transformer automatiquement
-un `node_repl` long en attente utilisateur. Un calcul long produit les mêmes
-signaux de silence sur disque.
+The integration probe then found `idle`, consistent with the task's `Stop`
+hook after it resumed/ended. A long `node_repl` must therefore not be turned
+automatically into a user wait. A long computation produces the same
+silence signals on disk.
 
-L’[événement MCP officiel](https://learn.chatgpt.com/docs/app-server#mcp-server-elicitation-requests)
-est `mcpServer/elicitation/request`. Son existence explique le comportement, mais
-la documentation app-server **ne documente pas** le transport Electron utilisé ici.
+The [official MCP event](https://learn.chatgpt.com/docs/app-server#mcp-server-elicitation-requests)
+is `mcpServer/elicitation/request`. Its existence explains the behavior, but
+the app-server documentation **does not document** the Electron transport used here.
 
-### Une piste écartée à tort lors de l’investigation initiale
+### A lead wrongly ruled out during the initial investigation
 
-Les processus app-server du desktop utilisent `stdio://`. Démarrer un autre
-app-server ou le daemon ne donne pas accès à l’état en mémoire de ces processus.
-En revanche, `~/.codex/ipc/ipc.sock` est un routeur Electron entre clients locaux.
-Une sonde JSON-RPC délimitée par des retours à la ligne n’obtient pas de réponse
-valide : ce n’est pas son format. Ce socket **permet** de découvrir le propriétaire
-d’une tâche et de recevoir son état courant avec le protocole ci-dessous.
+The desktop's app-server processes use `stdio://`. Starting another
+app-server or the daemon does not give access to the in-memory state of these processes.
+However, `~/.codex/ipc/ipc.sock` is an Electron router between local clients.
+A newline-delimited JSON-RPC probe gets no valid
+response: that is not its format. This socket **does allow** discovering the owner
+of a task and receiving its current state with the protocol below.
 
-## Répartition du code
+## Code layout
 
-| Fichier | Responsabilité |
+| File | Responsibility |
 | --- | --- |
-| `crates/agentsmon-providers/src/codex_ipc/protocol.rs` | Versions, schémas limités, validation et traduction des états |
-| `crates/agentsmon-providers/src/codex_ipc/transport.rs` | Socket Unix, contrôle du propriétaire, frames, limites et délais |
-| `crates/agentsmon-providers/src/codex_ipc/mod.rs` | Worker, échantillonnage, découverte du propriétaire, cache et repli |
-| `crates/agentsmon-providers/src/codex_ipc/tests.rs` | Faux routeur, panne, confidentialité, cache et sonde réelle facultative |
-| `crates/agentsmon-providers/src/codex.rs` | Superposition du statut direct aux hooks/lifecycle |
-| `crates/agentsmon/src/connection_diagnostics.rs` | Rapports persistants, journal rotatif, limite globale de notifications |
-| `crates/agentsmon/src/notification.rs` | Notification native et capture du rapport pour le clic |
-| `crates/agentsmon-ui/src/diagnostic_report.rs` | Fenêtre générique et copie du prompt |
+| `crates/agentsmon-providers/src/codex_ipc/protocol.rs` | Versions, restricted schemas, validation and state translation |
+| `crates/agentsmon-providers/src/codex_ipc/transport.rs` | Unix socket, ownership check, frames, limits and timeouts |
+| `crates/agentsmon-providers/src/codex_ipc/mod.rs` | Worker, sampling, owner discovery, cache and fallback |
+| `crates/agentsmon-providers/src/codex_ipc/tests.rs` | Fake router, fault, privacy, cache and optional live probe |
+| `crates/agentsmon-providers/src/codex.rs` | Overlay of the direct status on hooks/lifecycle |
+| `crates/agentsmon/src/connection_diagnostics.rs` | Persistent reports, rotating log, global notification limit |
+| `crates/agentsmon/src/notification.rs` | Native notification and capture of the report for the click |
+| `crates/agentsmon-ui/src/diagnostic_report.rs` | Generic window and prompt copy |
 
-Le core et `MonitorView` ne connaissent pas le protocole Codex. Les changements
-du worker passent par `AgentProvider::take_changed()`, puis le même `refresh` /
-`broadcast` que les hooks : tous les panneaux et la source IPC AgentsMon reçoivent
-le nouvel état. L’IPC **publié par AgentsMon** est un autre contrat : ne pas
-modifier `crates/local-source-ipc` pour adapter le protocole privé de Codex.
+The core and `MonitorView` do not know the Codex protocol. Worker
+changes go through `AgentProvider::take_changed()`, then the same `refresh` /
+`broadcast` as hooks: every panel and the AgentsMon IPC source receive
+the new state. The IPC **published by AgentsMon** is a different contract: do not
+modify `crates/local-source-ipc` to accommodate Codex's private protocol.
 
-## Transport et séquence vérifiés
+## Verified transport and sequence
 
-- Endpoint Unix : `$CODEX_HOME/ipc/ipc.sock`, ou `~/.codex/ipc/ipc.sock`.
-- AgentsMon ne crée, ne supprime et ne répare jamais ce socket.
-- Répertoire privé appartenant à l’utilisateur courant ; socket privé du même
-  utilisateur. Liens symboliques et permissions de groupe/autres refusés.
-- Chaque message : **4 octets u32 little-endian**, longueur du JSON UTF-8 qui suit,
-  puis exactement cette quantité d’octets. Aucun séparateur de ligne.
-- `type` vaut notamment `request`, `response`, `broadcast`,
+- Unix endpoint: `$CODEX_HOME/ipc/ipc.sock`, or `~/.codex/ipc/ipc.sock`.
+- AgentsMon never creates, deletes or repairs this socket.
+- Private directory owned by the current user; private socket of the same
+  user. Symbolic links and group/other permissions are refused.
+- Each message: **4 bytes u32 little-endian**, the length of the UTF-8 JSON that follows,
+  then exactly that many bytes. No line separator.
+- `type` values include `request`, `response`, `broadcast`,
   `client-discovery-request`, `client-discovery-response`.
-- Les `requestId` corrèlent les réponses ; `sourceClientId` et `targetClientIds`
-  routent les messages. `hostId=local` seulement.
+- The `requestId` values correlate responses; `sourceClientId` and `targetClientIds`
+  route messages. `hostId=local` only.
 
-| Message | Version vérifiée |
+| Message | Verified version |
 | --- | ---: |
 | `initialize` | 0 |
 | `thread-owner-discovery` | 1 |
 | `thread-stream-following-changed` | 1 |
 | `thread-stream-state-changed` | 11 |
 
-### 1. Initialisation
+### 1. Initialization
 
 ```json
 {"type":"request","requestId":"agentsmon-123-1","sourceClientId":"initializing-client","version":0,"method":"initialize","params":{"clientType":"agentsmon"},"timeoutMs":2000}
 ```
 
-La réponse doit avoir `resultType=success`, `method=initialize` et
-`result.clientId` UUID. Utiliser cet identifiant pour les messages suivants.
-Un client inconnu est autorisé ; ne pas se faire passer pour une fenêtre Codex.
+The response must have `resultType=success`, `method=initialize` and
+a UUID `result.clientId`. Use this identifier for the following messages.
+An unknown client is allowed; do not impersonate a Codex window.
 
-### 2. Découverte du propriétaire de la tâche
+### 2. Task owner discovery
 
 ```json
 {"type":"request","requestId":"agentsmon-123-2","sourceClientId":"CLIENT_UUID","version":1,"method":"thread-owner-discovery","params":{"hostId":"local","conversationId":"THREAD_UUID"},"timeoutMs":2000}
 ```
 
-La réponse réussie fournit `handledByClientId`. `error=no-client-found` est un
-cas normal : tâche CLI, fenêtre fermée, tâche déchargée ou sans propriétaire
-desktop. Les autres erreurs de contrat donnent un diagnostic.
+The successful response provides `handledByClientId`. `error=no-client-found` is a
+normal case: CLI task, closed window, unloaded task or task without a desktop
+owner. Other contract errors produce a diagnostic.
 
-### 3. Abonnement temporaire et snapshot
+### 3. Temporary subscription and snapshot
 
 ```json
 {"type":"broadcast","sourceClientId":"CLIENT_UUID","targetClientIds":["OWNER_UUID"],"method":"thread-stream-following-changed","version":1,"params":{"conversationId":"THREAD_UUID","hostId":"local","following":true}}
 ```
 
-Le propriétaire publie `thread-stream-state-changed`. Exemple **synthétique**
-réduit aux champs d’intérêt ; le message réel contient d’autres champs qui ne
-doivent jamais être décodés ou enregistrés :
+The owner publishes `thread-stream-state-changed`. **Synthetic** example
+reduced to the fields of interest; the real message contains other fields that
+must never be decoded or recorded:
 
 ```json
 {
@@ -133,191 +133,191 @@ doivent jamais être décodés ou enregistrés :
 }
 ```
 
-Vérifier l’émetteur, la version, l’hôte et les deux identifiants de tâche. Ne pas
-accepter un statut d’une autre tâche. Un `change.type=patches` est ignoré :
-attendre le snapshot complet. Ses valeurs ne sont pas analysées.
+Check the sender, the version, the host and both task identifiers. Do not
+accept a status from another task. A `change.type=patches` is ignored:
+wait for the full snapshot. Its values are not parsed.
 
-### 4. Désabonnement
+### 4. Unsubscription
 
-Envoyer exactement le message d’abonnement avec `following=false`, sur succès
-**et sur erreur**. Si l’envoi échoue, fermer la connexion. La déconnexion fait
-désinscrire le client au routeur. L’abonnement temporaire n’accepte aucune
-autorisation, ne marque pas la tâche lue et ne demande aucun changement de rôle.
-Le desktop peut maintenir son état chargé pendant ce bref abonnement.
+Send exactly the subscription message with `following=false`, on success
+**and on error**. If sending fails, close the connection. Disconnecting gets
+the client unregistered at the router. The temporary subscription accepts no
+approval, does not mark the task as read and requests no role change.
+The desktop may keep its state loaded during this brief subscription.
 
-Le routeur peut demander si AgentsMon sait traiter des commandes via
-`client-discovery-request`. Répondre `client-discovery-response` avec
-`response.canHandle=false`. Ne jamais proposer un handler de commande ou réclamer
-la propriété d’une tâche.
+The router may ask whether AgentsMon can handle commands via
+`client-discovery-request`. Reply `client-discovery-response` with
+`response.canHandle=false`. Never offer a command handler or claim
+ownership of a task.
 
-## États, fraîcheur et limites
+## States, freshness and limits
 
-| Statut direct | Résultat |
+| Direct status | Result |
 | --- | --- |
 | `active` + `waitingOnApproval` | `Waiting` / orange |
 | `active` + `waitingOnUserInput` | `Waiting` / orange |
-| `active` + tableau vide | `Active` / vert, sauf compaction explicite conservée |
-| `idle` | `Idle` / gris |
-| `notLoaded`, `systemError` | Aucun remplacement ; utiliser les hooks/lifecycle |
-| État ou flag inconnu, `activeFlags` absent pour `active` | Diagnostic et repli |
+| `active` + empty array | `Active` / green, except that an explicit compaction is kept |
+| `idle` | `Idle` / grey |
+| `notLoaded`, `systemError` | No override; use hooks/lifecycle |
+| Unknown state or flag, `activeFlags` missing for `active` | Diagnostic and fallback |
 
-- Worker unique par provider, aucune attente réseau sur le thread GPUI.
-- Les sessions éligibles ont un processus valide et un état de repli non idle.
-  Les sessions archivées/expirées sont exclues avant cette étape.
-- Au plus **32 sessions**, les plus récemment actives en priorité ; les autres
-  gardent les hooks. Les constructeurs de provider destinés aux tests de fichiers
-  n’ouvrent aucune connexion au vrai desktop.
-- Échantillonnage nominal toutes les **3 secondes**, réveil sur changement des
-  cibles. Une connexion est réutilisée ; le propriétaire est redécouvert à chaque
-  échantillon pour supporter le changement de fenêtre.
-- **3 secondes par opération** (connexion, init, découverte, lecture complète,
-  abonnement/désabonnement). Le délai est global pour la frame : un émetteur qui
-  ne fournit que quelques octets ne peut pas prolonger indéfiniment la lecture.
-- Les cibles sont interrogées séquentiellement : sous forte charge, la fréquence
-  par cible peut diminuer. La fraîcheur est prioritaire sur la conservation d’un
-  statut ancien.
-- Cache valable **moins de 15 secondes** ; rejet dès que le timestamp du hook
-  change. Un nouveau hook ne peut pas hériter de l’autorisation du tour précédent.
-  Les événements explicites de fin détectés par le provider restent prioritaires.
-- Les mises à jour sont regroupées et affichées via le refresh habituel (au plus
-  une fois par seconde sur signal ; refresh périodique normalement 10 secondes).
-  Une expiration silencieuse apparaît donc au refresh périodique suivant.
-- Trames limitées à **16 Mio** (l’application autorise davantage). Allocation
-  fallible, JSON borné par la frame, récursion Serde limitée, au plus 16 flags et
-  128 messages intercalés avant une réponse. Un snapshot plus gros provoque un
-  repli documenté, pas une hausse automatique de la limite.
-- Après une erreur : cache invalidé, connexion abandonnée. Reconnexion graduelle
-  de 6 à 60 secondes ; incompatibilité suspectée : 60 secondes. Les hooks ne
-  contournent pas ce délai. Pas de boucle de reconnexion agressive.
-- Un panic du worker est intercepté ; le cache est écarté et un diagnostic est
-  signalé. Aucun `join` bloquant à l’arrêt de l’interface.
-- Support direct Unix ; **Windows reste sur hooks/lifecycle**. Ne pas annoncer
-  le support du named pipe Windows sans implémentation et tests correspondants.
+- Single worker per provider, no network wait on the GPUI thread.
+- Eligible sessions have a valid process and a non-idle fallback state.
+  Archived/expired sessions are excluded before this step.
+- At most **32 sessions**, the most recently active first; the others
+  keep the hooks. Provider constructors intended for file tests
+  open no connection to the real desktop.
+- Nominal sampling every **3 seconds**, woken when the targets
+  change. One connection is reused; the owner is rediscovered at each
+  sample to support a window change.
+- **3 seconds per operation** (connection, init, discovery, full read,
+  subscribe/unsubscribe). The timeout is global for the frame: a sender that
+  provides only a few bytes cannot extend the read indefinitely.
+- Targets are queried sequentially: under heavy load, the frequency
+  per target may drop. Freshness takes priority over keeping an
+  old status.
+- Cache valid for **less than 15 seconds**; rejected as soon as the hook timestamp
+  changes. A new hook cannot inherit the approval of the previous turn.
+  Explicit end events detected by the provider keep priority.
+- Updates are batched and displayed through the usual refresh (at most
+  once per second on signal; periodic refresh normally 10 seconds).
+  A silent expiry therefore appears at the next periodic refresh.
+- Frames limited to **16 MiB** (the application allows more). Fallible
+  allocation, JSON bounded by the frame, limited Serde recursion, at most 16 flags and
+  128 interleaved messages before a response. A larger snapshot causes a
+  documented fallback, not an automatic increase of the limit.
+- After an error: cache invalidated, connection dropped. Gradual reconnection
+  from 6 to 60 seconds; suspected incompatibility: 60 seconds. Hooks do not
+  bypass this delay. No aggressive reconnection loop.
+- A worker panic is caught; the cache is discarded and a diagnostic is
+  reported. No blocking `join` when the interface shuts down.
+- Direct support on Unix; **Windows stays on hooks/lifecycle**. Do not announce
+  Windows named pipe support without the corresponding implementation and tests.
 
-L’absence de socket, sa fermeture et l’absence de propriétaire ne sont pas des
-preuves de changement de protocole. Elles ne génèrent pas de notification de
-compatibilité. Une évolution qui rend toute découverte indistinguable d’un
-`no-client-found` ne peut pas être identifiée avec certitude par ce seul contrat.
+A missing socket, its closure and a missing owner are not
+evidence of a protocol change. They do not generate a compatibility
+notification. A change that makes every discovery indistinguishable from a
+`no-client-found` cannot be identified with certainty by this contract alone.
 
-## Confidentialité
+## Privacy
 
-Le wire format du desktop transporte potentiellement toute une conversation.
-Le worker reçoit les octets bornés en mémoire le temps du décodage, puis les
-libère. Il ne décode que l’enveloppe, les identifiants de routage et
-`threadRuntimeStatus`. Les titres, previews, tours, messages, demandes,
-arguments/résultats d’outils et patches sont ignorés par Serde.
+The desktop's wire format potentially carries an entire conversation.
+The worker receives the bounded bytes in memory for the duration of decoding, then
+frees them. It decodes only the envelope, the routing identifiers and
+`threadRuntimeStatus`. Titles, previews, turns, messages, requests,
+tool arguments/results and patches are ignored by Serde.
 
-`RawValue` est uniquement une **référence empruntée** dans la frame temporaire
-pour choisir le schéma après vérification de l’enveloppe. Ne jamais en conserver
-une copie, l’imprimer, l’écrire sur disque, ni utiliser `serde_json::Value` pour
-une réponse réelle. `Value` est réservé aux requêtes construites par AgentsMon
-et aux données synthétiques des tests.
+`RawValue` is only a **borrowed reference** into the temporary frame,
+used to choose the schema after the envelope has been checked. Never keep
+a copy of it, print it, write it to disk, or use `serde_json::Value` for
+a real response. `Value` is reserved for requests built by AgentsMon
+and for synthetic test data.
 
-Les erreurs Serde peuvent inclure des valeurs d’entrée dans leur texte. C’est
-pourquoi seuls leur catégorie, ligne et colonne sont consignés. Les valeurs
-inconnues de statut/flag ne sont pas reproduites dans le rapport.
+Serde errors can include input values in their text. This is
+why only their category, line and column are logged. Unknown
+status/flag values are not reproduced in the report.
 
-## Notifications et fichiers de diagnostic
+## Notifications and diagnostic files
 
-Un incident détecté produit :
+A detected incident produces:
 
-1. Un événement explicite `agentsmon::codex_ipc` dans tracing, avec code, phase,
-   versions, limites et repli.
-2. Un événement JSON dans **`diagnostics/provider-diagnostics.log`**, même si
-   `RUST_LOG` masque les warnings ou si Finder ne conserve pas stderr.
-3. Un rapport dans **`diagnostics/provider-diagnostics.json`**, avec les dates,
-   le dernier incident de chaque provider et la réservation de notification.
-4. Au plus **une notification par heure**, globalement pour ces diagnostics,
-   tous codes/providers confondus. Cette limite est persistée **avant** l’envoi,
-   et reste valable après redémarrage, changement d’erreur et rétablissement.
+1. An explicit `agentsmon::codex_ipc` event in tracing, with code, phase,
+   versions, limits and fallback.
+2. A JSON event in **`diagnostics/provider-diagnostics.log`**, even if
+   `RUST_LOG` hides warnings or Finder does not keep stderr.
+3. A report in **`diagnostics/provider-diagnostics.json`**, with the dates,
+   the last incident of each provider and the notification reservation.
+4. At most **one notification per hour**, globally for these diagnostics,
+   across all codes/providers. This limit is persisted **before** sending,
+   and still applies after a restart, a change of error and a recovery.
 
-Sur macOS, le répertoire est normalement :
+On macOS, the directory is normally:
 
 ```text
-~/Library/Application Support/com.oliv.AgentsMon/diagnostics/
+~/Library/Application Support/fr.gmbl.AgentsMon/diagnostics/
 ```
 
-Le log tourne à **512 Kio**, avec un seul précédent `.log.1`. Les répétitions
-identiques sont consignées au plus une fois par heure ; un nouvel incident ou
-un incident qui cesse d’être signalé est consigné immédiatement. La limite de
-notifications d’incidents ne s’applique pas aux notifications ordinaires des agents.
+The log rotates at **512 KiB**, with a single previous `.log.1`. Identical
+repetitions are logged at most once per hour; a new incident or
+an incident that stops being reported is logged immediately. The incident
+notification limit does not apply to ordinary agent notifications.
 
-Le clic ouvre un rapport avec **« Copier le prompt de diagnostic »**. Le prompt
-inclut les versions attendues/observées disponibles, le code, la phase, les
-horodatages, le socket, l’ID technique de session, les chemins des logs et ce
-document. Il n’est pas envoyé automatiquement. Il est également accessible dans
-**AgentsMon → Diagnostic des connexions…**, même après un redémarrage ou si les
-notifications natives sont désactivées.
+The click opens a report with **"Copy diagnostic prompt"**. The prompt
+includes the available expected/observed versions, the code, the phase, the
+timestamps, the socket, the technical session ID, the log paths and this
+document. It is not sent automatically. It is also available in
+**AgentsMon → Connection diagnostics…**, even after a restart or if
+native notifications are disabled.
 
-Le callback capture le rapport envoyé : une réparation ultérieure ne remplace
-pas les détails de la notification par « tout va bien ». La notification de
-diagnostic n’a pas de TTL applicatif court : elle reste cliquable dans le centre
-de notifications pendant l’exécution d’AgentsMon. Le système garde le contrôle
-de l’affichage des bannières. Après arrêt de l’application, les handlers natifs
-en mémoire ne sont plus disponibles ; utiliser le rapport persistant du menu.
+The callback captures the report that was sent: a later repair does not replace
+the notification details with "all is well". The diagnostic
+notification has no short application-level TTL: it stays clickable in the notification
+center while AgentsMon is running. The system keeps control
+of banner display. After the application stops, the in-memory native
+handlers are no longer available; use the persistent report from the menu.
 
-Si le dossier de diagnostic n’est pas inscriptible, un warning l’indique. La
-limite reste active en mémoire mais sa persistance entre redémarrages ne peut pas
-être garantie. Un recul de l’horloge ne déclenche pas de notifications répétées.
-Le rapport indique « incident non signalé » lorsqu’un incident disparaît ; cela
-ne constitue pas une preuve que le desktop est connecté (il peut être arrêté).
+If the diagnostics folder is not writable, a warning says so. The
+limit stays active in memory but its persistence across restarts cannot
+be guaranteed. A clock moving backwards does not trigger repeated notifications.
+The report says "incident no longer reported" when an incident disappears; this
+is not evidence that the desktop is connected (it may be stopped).
 
-## Procédure lorsque Codex change
+## Procedure when Codex changes
 
-### Lecture des codes d’incident
+### Reading the incident codes
 
-| Code | Première vérification |
+| Code | First check |
 | --- | --- |
-| `stream_version_changed` | Version de `thread-stream-state-changed` dans la table du client Electron |
-| `schema_changed` | Structure de l’enveloppe/du snapshot à la phase indiquée ; seules catégorie et position JSON sont conservées |
-| `initialize_rejected`, `initialize_result_missing`, `invalid_client_id` | Réponse d’initialisation et format de `result.clientId` |
-| `owner_response_changed`, `invalid_owner_id` | Découverte du propriétaire, version 1 et `handledByClientId` |
-| `snapshot_missing`, `snapshot_state_missing`, `session_mismatch` | Routage local et chemin `params.change.conversationState` |
-| `unknown_change_type` | Nouvelles variantes de `change.type` ; ne pas interpréter un patch comme un snapshot |
-| `missing_active_flags`, `unknown_active_flag`, `unknown_runtime_status` | Enum du statut et des flags ; vérifier leur sémantique avant de les accepter |
-| `frame_size` | Framing little-endian et taille observée ; conversation trop volumineuse possible, sans changement du protocole |
-| `response_timeout` | Phase concernée, desktop temporairement bloqué ou réponse attendue ayant changé |
-| `message_limit` | Routage trop large, flux parasite, ou snapshot attendu qui n’arrive pas |
-| `allocation_limit` | Limites de mémoire et taille du snapshot ; ne pas retirer les bornes |
-| `worker_start_failed`, `worker_panicked`, `encode_error` | Problème local AgentsMon ; inspecter l’environnement et le worker |
-| `transport_unavailable` | Socket absent/fermé/refusé ; repli normal, sans notification de protocole |
+| `stream_version_changed` | Version of `thread-stream-state-changed` in the Electron client's table |
+| `schema_changed` | Structure of the envelope/snapshot at the indicated phase; only the JSON category and position are kept |
+| `initialize_rejected`, `initialize_result_missing`, `invalid_client_id` | Initialization response and format of `result.clientId` |
+| `owner_response_changed`, `invalid_owner_id` | Owner discovery, version 1 and `handledByClientId` |
+| `snapshot_missing`, `snapshot_state_missing`, `session_mismatch` | Local routing and the `params.change.conversationState` path |
+| `unknown_change_type` | New variants of `change.type`; do not interpret a patch as a snapshot |
+| `missing_active_flags`, `unknown_active_flag`, `unknown_runtime_status` | Status and flag enum; check their semantics before accepting them |
+| `frame_size` | Little-endian framing and observed size; possibly a conversation that is too large, with no protocol change |
+| `response_timeout` | Phase concerned, desktop temporarily blocked or expected response changed |
+| `message_limit` | Routing too broad, stray stream, or expected snapshot that does not arrive |
+| `allocation_limit` | Memory limits and snapshot size; do not remove the bounds |
+| `worker_start_failed`, `worker_panicked`, `encode_error` | Local AgentsMon problem; inspect the environment and the worker |
+| `transport_unavailable` | Socket missing/closed/refused; normal fallback, without a protocol notification |
 
 ### Investigation
 
-1. Copier le prompt depuis la notification ou le menu. Conserver les logs
-   techniques ; ne pas copier une conversation, un rollout complet ou une DB.
-2. Examiner `code`, `phase`, `expected` / `observed`, la taille des trames et
-   l’erreur IO. Distinguer version inconnue, schéma manquant, délai et socket absent.
-3. Vérifier la version de l’application (`Contents/Info.plist`) et du binaire
-   embarqué (`Contents/Resources/codex --version`). La commande `codex` du PATH
-   peut être une autre version, voire une installation npm cassée.
-4. Inspecter **le code applicatif**, pas les données des conversations. Dans
-   `/Applications/ChatGPT.app/Contents/Resources/app.asar`, les fichiers de la
-   version initiale étaient :
-   - `.vite/build/src-B6LqG3ek.js` : `IpcClient`, `IpcRouter`, framing et versions ;
-   - `webview/assets/app-initial-a9514281e192.js` : `threadRuntimeStatus`,
-     `handleThreadStreamFollowingChanged`, `sendConversationSnapshot` ;
-   - `.vite/build/main-Bkkz0ENj.js` : raccordements au desktop/app-server.
-   Les suffixes changent avec les builds. Rechercher les chaînes stables
+1. Copy the prompt from the notification or the menu. Keep the technical
+   logs; do not copy a conversation, a full rollout or a DB.
+2. Examine `code`, `phase`, `expected` / `observed`, the frame size and
+   the IO error. Distinguish unknown version, missing schema, timeout and missing socket.
+3. Check the version of the application (`Contents/Info.plist`) and of the embedded
+   binary (`Contents/Resources/codex --version`). The `codex` command on the PATH
+   may be another version, or even a broken npm installation.
+4. Inspect **the application code**, not the conversation data. In
+   `/Applications/ChatGPT.app/Contents/Resources/app.asar`, the files of the
+   initial version were:
+   - `.vite/build/src-B6LqG3ek.js`: `IpcClient`, `IpcRouter`, framing and versions;
+   - `webview/assets/app-initial-a9514281e192.js`: `threadRuntimeStatus`,
+     `handleThreadStreamFollowingChanged`, `sendConversationSnapshot`;
+   - `.vite/build/main-Bkkz0ENj.js`: connections to the desktop/app-server.
+   The suffixes change with builds. Search for the stable strings
    `ipc.sock`, `readUInt32LE`, `thread-owner-discovery`,
    `thread-stream-following-changed`, `thread-stream-state-changed`,
    `waitingOnApproval`, `mcpServer/elicitation/request`.
-5. Pour extraire un ASAR sans dépendance npm : lire les quatre u32 little-endian
-   à l’offset 0 ; le quatrième est la longueur du JSON d’index à l’offset 16.
-   Les données commencent à `8 + deuxième_u32`. Parcourir `files` dans l’index ;
-   les offsets de fichier sont relatifs à ce début. Écrire seulement les fichiers
-   JavaScript sélectionnés dans un dossier temporaire. Ne pas modifier l’app.
-6. Vérifier la séquence ci-dessus, les noms/champs et les nouvelles versions dans
-   le code. Réviser les décoders typés et les tests synthétiques avant d’accepter
-   une nouvelle version. Un numéro différent ne prouve pas la compatibilité.
-7. Utiliser la sonde explicite ci-dessous avec un UUID obtenu dans un record de
-   métadonnées AgentsMon. Observer une autorisation réellement affichée et une
-   tâche active témoin ; ne jamais accepter/refuser une autorisation pour sonder.
-8. Faire passer les tests de panne et confidentialité, puis les contrôles du
-   workspace. Mettre à jour ce document avec la nouvelle version vérifiée et les
-   différences observées.
+5. To extract an ASAR without an npm dependency: read the four little-endian u32
+   at offset 0; the fourth is the length of the index JSON at offset 16.
+   The data starts at `8 + second_u32`. Walk `files` in the index;
+   file offsets are relative to this start. Write only the selected JavaScript
+   files to a temporary folder. Do not modify the app.
+6. Check the sequence above, the names/fields and the new versions in
+   the code. Revise the typed decoders and the synthetic tests before accepting
+   a new version. A different number does not prove compatibility.
+7. Use the explicit probe below with a UUID obtained from an AgentsMon
+   metadata record. Observe an approval that is actually displayed and an
+   active control task; never accept/deny an approval in order to probe.
+8. Get the fault and privacy tests to pass, then the workspace
+   checks. Update this document with the new verified version and the
+   differences observed.
 
-## Tests et commandes
+## Tests and commands
 
 ```sh
 cargo test -p agentsmon-providers codex
@@ -330,60 +330,60 @@ claude plugin validate .
 python3 scripts/validate-plugin.py
 ```
 
-Les tests IPC créent exclusivement des sockets temporaires et des données
-synthétiques. Un environnement sandbox peut interdire `bind`/`connect` avec
-`EPERM` : autoriser ces tests locaux, ne pas désactiver leur assertion pour les
-faire passer. La sonde réelle est ignorée par défaut :
+The IPC tests create only temporary sockets and synthetic
+data. A sandbox environment may forbid `bind`/`connect` with
+`EPERM`: allow these local tests, do not disable their assertion to make
+them pass. The live probe is ignored by default:
 
 ```sh
-AGENTSMON_CODEX_DIAGNOSTIC_SESSION=UUID_EXPLICITE \
+AGENTSMON_CODEX_DIAGNOSTIC_SESSION=EXPLICIT_UUID \
   cargo test -p agentsmon-providers live_desktop_status -- --ignored --nocapture
 ```
 
-Elle affiche seulement l’ID fourni et `Some(Waiting)`, `Some(Active)`, `Some(Idle)`
-ou `None`. Une panne affiche uniquement un `Fault` nettoyé. Elle se désabonne et
-ne conserve ni le snapshot ni les messages.
+It prints only the supplied ID and `Some(Waiting)`, `Some(Active)`, `Some(Idle)`
+or `None`. A fault prints only a sanitized `Fault`. It unsubscribes and
+keeps neither the snapshot nor the messages.
 
-Les tests couvrent : états et flags, schéma/version inconnus, payload privé
-ignoré, source/tâche différentes, patches ignorés, refus d’offrir des commandes,
-désabonnement sur erreur, propriétaire/socket absent, fragmentation, taille
-excessive, lecture partielle bloquée, EOF, cache périmé/nouveau hook, worker,
-limite horaire après redémarrage/rétablissement, journal rotatif et stockage
-inaccessible. Les notifications natives et la copie du rapport nécessitent
-aussi une vérification de l’interface sur la plateforme ciblée.
+The tests cover: states and flags, unknown schema/version, ignored private
+payload, different source/task, ignored patches, refusal to offer commands,
+unsubscription on error, missing owner/socket, fragmentation, excessive
+size, blocked partial read, EOF, stale cache/new hook, worker,
+hourly limit after restart/recovery, rotating log and inaccessible
+storage. Native notifications and copying the report also require
+a check of the interface on the target platform.
 
-### Vérification isolée de la fenêtre
+### Isolated check of the window
 
 ```sh
 cargo run -p agentsmon --example diagnostic_preview
 ```
 
-Cet exécutable ouvre le véritable `DiagnosticReportView` avec un rapport
-synthétique marqué **TEST LOCAL**. Il ne démarre aucun provider, n’installe aucun
-hook, n’affiche aucune barre et ne touche pas au dossier de diagnostics réel.
-Vérifier le défilement, le redimensionnement et « Copier le prompt de diagnostic ».
-Le texte complet est copié, même lorsque certaines lignes sont hors de la zone
-visible. Ce test a été effectué sur macOS pendant le développement du correctif.
+This executable opens the real `DiagnosticReportView` with a synthetic
+report marked **LOCAL TEST**. It starts no provider, installs no
+hook, displays no bar and does not touch the real diagnostics folder.
+Check scrolling, resizing and "Copy diagnostic prompt".
+The full text is copied, even when some lines are outside the visible
+area. This test was performed on macOS during development of the fix.
 
-Pour tester aussi l’envoi natif et le clic, ajouter `--notify` à **cet exemple**.
-Sur macOS, le binaire doit être placé dans un bundle `.app` avec un
-`CFBundleIdentifier` et l’autorisation de notifications. Utiliser une identité de
-test distincte pour ne pas remplacer le handler de l’instance AgentsMon ouverte.
-L’exemple utilise le même `NativeNotifications` que l’application ; son clic
-rouvre le rapport capturé. La notification porte explicitement le nom **Codex —
-TEST**. Elle ne consomme pas la limite horaire du dossier de diagnostics réel.
+To also test native delivery and the click, add `--notify` to **this example**.
+On macOS, the binary must be placed in a `.app` bundle with a
+`CFBundleIdentifier` and the notification permission. Use a separate test
+identity so as not to replace the handler of the open AgentsMon instance.
+The example uses the same `NativeNotifications` as the application; its click
+reopens the captured report. The notification explicitly carries the name **Codex —
+TEST**. It does not consume the hourly limit of the real diagnostics folder.
 
-### Validation initiale du correctif
+### Initial validation of the fix
 
-- Les 109 tests automatisés du workspace passent sur macOS (deux tests ignorés
-  par défaut : sous-processus fixture Vibe et sonde réelle Codex).
-- `cargo check --workspace`, Clippy avec `-D warnings`, `cargo fmt --check`,
-  `claude plugin validate .` et `scripts/validate-plugin.py` passent.
-- La sonde du code intégré communique avec l’application installée et retrouve
-  `Idle` pour la tâche initiale, qui avait entre-temps émis `Stop`.
-- L’investigation initiale avait mesuré `waitingOnApproval` sur cette même tâche
-  pendant le blocage ; les faux routeurs couvrent cet état et la dérive vers une
-  version 12, jusqu’à la publication du diagnostic par le worker.
-- La fenêtre et son bouton de copie ont été vérifiés dans le bundle de test.
-  L’affichage/clic d’une notification native réelle et Windows restent des
-  vérifications manuelles distinctes ; ne pas les déduire d’un test de quota.
+- The 109 automated tests of the workspace pass on macOS (two tests ignored
+  by default: Vibe fixture subprocess and Codex live probe).
+- `cargo check --workspace`, Clippy with `-D warnings`, `cargo fmt --check`,
+  `claude plugin validate .` and `scripts/validate-plugin.py` pass.
+- The probe in the integrated code communicates with the installed application and finds
+  `Idle` for the initial task, which had emitted `Stop` in the meantime.
+- The initial investigation had measured `waitingOnApproval` on this same task
+  during the block; the fake routers cover this state and the drift to a
+  version 12, up to the publication of the diagnostic by the worker.
+- The window and its copy button were checked in the test bundle.
+  Display/click of a real native notification and Windows remain
+  separate manual checks; do not infer them from a quota test.

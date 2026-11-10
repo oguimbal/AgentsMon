@@ -478,7 +478,7 @@ impl MonitorView {
                     .px(px(5.0))
                     .text_size(px(10.0))
                     .text_color(rgb(0x92949d))
-                    .child("Aucun agent"),
+                    .child("No agent"),
             )
         } else {
             root.children(
@@ -1110,18 +1110,18 @@ impl Render for ProviderDetailsView {
         let mut rows = Vec::new();
         if let Some(usage) = &provider.usage {
             if let Some(plan) = &usage.plan {
-                rows.push(("Offre".to_string(), plan.clone()));
+                rows.push(("Plan".to_string(), plan.clone()));
             }
             rows.extend(usage_rows(usage));
         } else {
-            rows.push(("Quota".into(), "Indisponible".into()));
+            rows.push(("Quota".into(), "Unavailable".into()));
         }
         rows.push((
             "Sessions".into(),
             if provider.sessions_hidden {
-                "masquées · clic pour afficher".into()
+                "hidden · click to show".into()
             } else {
-                "clic pour masquer".into()
+                "click to hide".into()
             },
         ));
         div()
@@ -1140,11 +1140,7 @@ impl Render for ProviderDetailsView {
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .child(provider.label().to_string()),
             )
-            .child(
-                div()
-                    .text_color(rgb(0xb9bbc3))
-                    .child("Utilisation du provider"),
-            )
+            .child(div().text_color(rgb(0xb9bbc3)).child("Provider usage"))
             .children(rows.into_iter().map(|(label, value)| {
                 div()
                     .flex()
@@ -1168,24 +1164,24 @@ impl Render for AgentDetailsView {
         let path = if !agent.cwd.as_os_str().is_empty() {
             agent.cwd.display().to_string()
         } else {
-            "Indisponible".into()
+            "Unavailable".into()
         };
         let context = agent
             .context_usage
-            .map(|usage| format!("{} %", format_percentage(usage.used_percentage())))
-            .unwrap_or_else(|| "Indisponible".into());
+            .map(|usage| format!("{}%", format_percentage(usage.used_percentage())))
+            .unwrap_or_else(|| "Unavailable".into());
         let mut rows = vec![
             ("Provider".to_string(), provider.to_string()),
-            ("État".to_string(), state.to_string()),
-            ("Contexte".to_string(), context),
+            ("State".to_string(), state.to_string()),
+            ("Context".to_string(), context),
         ];
         if let Some(usage) = &agent.provider_usage {
             if let Some(plan) = &usage.plan {
-                rows.push(("Offre".into(), plan.clone()));
+                rows.push(("Plan".into(), plan.clone()));
             }
             rows.extend(usage_rows(usage));
         } else {
-            rows.push(("Quota".into(), "Indisponible".into()));
+            rows.push(("Quota".into(), "Unavailable".into()));
         }
 
         div()
@@ -1246,7 +1242,7 @@ pub fn agent_details_height(agent: &AgentSnapshot) -> f32 {
 
 /// Height of the provider details popup for the same layout.
 pub fn provider_details_height(provider: &ProviderStatus) -> f32 {
-    // Provider name and the "Utilisation du provider" line, then one row per
+    // Provider name and the "Provider usage" line, then one row per
     // quota window (or the placeholder row), then the sessions toggle hint.
     let lines = 3 + match &provider.usage {
         Some(usage) => {
@@ -1272,12 +1268,12 @@ fn usage_rows(usage: &ProviderUsage) -> Vec<(String, String)> {
         .limits
         .iter()
         .map(|limit| {
-            let mut value = format!("{} %", format_percentage(limit.used_percentage()));
+            let mut value = format!("{}%", format_percentage(limit.used_percentage()));
             if let Some(minutes) = limit.window_minutes {
-                value.push_str(&format!(" sur {}", format_window(minutes)));
+                value.push_str(&format!(" over {}", format_window(minutes)));
             }
             if let Some(reset) = limit.resets_at {
-                value.push_str(&format!(" · reset {}", format_reset(reset)));
+                value.push_str(&format!(" · resets {}", format_reset(reset)));
             }
             (limit.label.clone(), value)
         })
@@ -1285,7 +1281,7 @@ fn usage_rows(usage: &ProviderUsage) -> Vec<(String, String)> {
     if usage.stale {
         rows.push((
             "Session".into(),
-            "expirée · données périmées (relancez /login)".into(),
+            "expired · stale data (run /login again)".into(),
         ));
     }
     rows
@@ -1293,17 +1289,17 @@ fn usage_rows(usage: &ProviderUsage) -> Vec<(String, String)> {
 
 fn state_label(state: AgentState) -> &'static str {
     match state {
-        AgentState::Active => "Actif",
-        AgentState::Waiting => "En attente d’une action",
-        AgentState::Idle => "Au repos",
-        AgentState::Compacting => "Compaction",
-        AgentState::Awaiting => "En attente d’une tâche de fond",
+        AgentState::Active => "Active",
+        AgentState::Waiting => "Waiting for you",
+        AgentState::Idle => "Idle",
+        AgentState::Compacting => "Compacting",
+        AgentState::Awaiting => "Waiting for a background task",
     }
 }
 
 fn format_window(minutes: u64) -> String {
     if minutes.is_multiple_of(10_080) {
-        format!("{} j", minutes / 1_440)
+        format!("{} d", minutes / 1_440)
     } else if minutes.is_multiple_of(60) {
         format!("{} h", minutes / 60)
     } else {
@@ -1317,17 +1313,17 @@ fn format_reset(reset: std::time::SystemTime) -> String {
         .unwrap_or_default()
         .as_secs();
     if remaining == 0 {
-        return "maintenant".into();
+        return "now".into();
     }
     let days = remaining / 86_400;
     let hours = (remaining % 86_400) / 3_600;
     let minutes = (remaining % 3_600) / 60;
     if days > 0 {
-        format!("dans {days} j {hours} h")
+        format!("in {days} d {hours} h")
     } else if hours > 0 {
-        format!("dans {hours} h {minutes} min")
+        format!("in {hours} h {minutes} min")
     } else {
-        format!("dans {} min", minutes.max(1))
+        format!("in {} min", minutes.max(1))
     }
 }
 
@@ -1409,8 +1405,8 @@ impl RenameView {
         };
         match cwd {
             Some(cwd) if !cwd.as_os_str().is_empty() => cwd.display().to_string(),
-            Some(_) => "Chemin indisponible".into(),
-            None => "Plusieurs dossiers".into(),
+            Some(_) => "Path unavailable".into(),
+            None => "Several directories".into(),
         }
     }
 
@@ -1421,7 +1417,7 @@ impl RenameView {
                 let mut meta = format!("{provider} · {}", state_label(agent.state));
                 if let Some(usage) = agent.context_usage {
                     meta.push_str(&format!(
-                        " · contexte {} %",
+                        " · context {}%",
                         format_percentage(usage.used_percentage())
                     ));
                 }
@@ -1479,7 +1475,7 @@ impl Render for RenameView {
                 div()
                     .text_size(px(10.0))
                     .text_color(rgb(0x8f929c))
-                    .child("Entrée : renommer · Échap : annuler · vide : nom du dépôt"),
+                    .child("Enter: rename · Esc: cancel · empty: repository name"),
             )
     }
 }
@@ -1596,34 +1592,34 @@ impl Render for DiagnosticsView {
         let fully_integrated = self.status.hook_found && self.status.statusline_wrapped;
         let (headline, detail, button_label) = if fully_integrated && self.status.plugin_found {
             (
-                "Claude Code est connecté",
-                "AgentsMon affiche l’état des sessions et leur utilisation du contexte."
-                    .to_string(),
-                "Désactiver l’intégration",
+                "Claude Code is connected",
+                "AgentsMon shows session states and their context usage.".to_string(),
+                "Disable the integration",
             )
         } else if fully_integrated {
             (
-                "Indicateur de contexte actif",
-                "Le suivi des sessions reste assuré par votre intégration existante.".to_string(),
-                "Désactiver l’indicateur de contexte",
+                "Context indicator enabled",
+                "Sessions are still tracked by your existing integration.".to_string(),
+                "Disable the context indicator",
             )
         } else if self.status.hook_found {
             (
-                "Afficher l’utilisation du contexte",
-                "Le suivi des sessions est déjà actif. AgentsMon peut aussi afficher le pourcentage de contexte utilisé.".to_string(),
-                "Activer l’indicateur de contexte",
+                "Show context usage",
+                "Sessions are already tracked. AgentsMon can also show the percentage of context used.".to_string(),
+                "Enable the context indicator",
             )
         } else if !self.status.claude_found {
             (
-                "Claude Code est introuvable",
-                "AgentsMon ne trouve pas la commande Claude Code et ne peut pas installer l’intégration.".to_string(),
-                "Installer l’intégration Claude Code",
+                "Claude Code not found",
+                "AgentsMon cannot find the Claude Code command and cannot install the integration."
+                    .to_string(),
+                "Install the Claude Code integration",
             )
         } else {
             (
-                "Connecter Claude Code",
-                "AgentsMon installera son plugin Claude Code pour votre compte utilisateur. Aucun contenu de conversation ne sera lu.".to_string(),
-                "Installer l’intégration Claude Code",
+                "Connect Claude Code",
+                "AgentsMon will install its Claude Code plugin for your user account. No conversation content is read.".to_string(),
+                "Install the Claude Code integration",
             )
         };
         let statusline = match (
@@ -1631,13 +1627,13 @@ impl Render for DiagnosticsView {
             self.status.statusline_wrapped,
         ) {
             (_, true) => {
-                "Seuls l’identifiant de session et le pourcentage de contexte sont transmis à AgentsMon.".to_string()
+                "Only the session identifier and the context percentage are sent to AgentsMon.".to_string()
             }
             (Some(command), false) => {
-                format!("Votre status line actuelle sera conservée et continuera de fonctionner normalement. Commande détectée : {command}")
+                format!("Your current status line is kept and keeps working as before. Detected command: {command}")
             }
             (None, false) => {
-                "AgentsMon ajoutera une intégration invisible à Claude Code. Seuls l’identifiant de session et le pourcentage de contexte seront transmis.".to_string()
+                "AgentsMon will add an invisible integration to Claude Code. Only the session identifier and the context percentage are sent.".to_string()
             }
         };
         let installed = fully_integrated;
@@ -1675,7 +1671,7 @@ impl Render for DiagnosticsView {
                     .child(
                         div()
                             .font_weight(gpui::FontWeight::MEDIUM)
-                            .child("Utilisation du contexte"),
+                            .child("Context usage"),
                     )
                     .child(div().text_color(rgb(0xa8aab2)).child(statusline)),
             )
@@ -1739,23 +1735,23 @@ impl Render for CodexApprovalView {
                         div()
                             .text_lg()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child("Autoriser le suivi de Codex"),
+                            .child("Allow Codex tracking"),
                     )
                     .child(
                         div()
                             .text_color(rgb(0xa8aab2))
-                            .child("ChatGPT n’exécute pas encore les hooks AgentsMon."),
+                            .child("ChatGPT does not run the AgentsMon hooks yet."),
                     )
                     .child(
                         div()
                             .pt_2()
                             .font_weight(gpui::FontWeight::MEDIUM)
-                            .child("Dans ChatGPT : Réglages → Hooks → User config"),
+                            .child("In ChatGPT: Settings → Hooks → User config"),
                     )
                     .child(
                         div()
                             .text_color(rgb(0xa8aab2))
-                            .child("Approuvez ensuite tous les hooks AgentsMon."),
+                            .child("Then approve every AgentsMon hook."),
                     ),
             )
             .child(
@@ -1771,7 +1767,7 @@ impl Render for CodexApprovalView {
                         .on_click(cx.listener(|_, _, _, cx| {
                             cx.emit(CodexApprovalEvent::Close);
                         }))
-                        .child("J’ai compris"),
+                        .child("Got it"),
                 ),
             )
     }
@@ -1876,7 +1872,7 @@ mod tests {
         agent.provider_usage = Some(ProviderUsage {
             limits: vec![
                 UsageLimit::new("5 h", 1.0, None, None).unwrap(),
-                UsageLimit::new("7 j", 1.0, None, None).unwrap(),
+                UsageLimit::new("7 d", 1.0, None, None).unwrap(),
                 UsageLimit::new("7 j · Fable", 1.0, None, None).unwrap(),
             ],
             plan: None,
@@ -1891,7 +1887,7 @@ mod tests {
         let usage = ProviderUsage {
             limits: vec![
                 UsageLimit::new("5 h", 1.0, None, None).unwrap(),
-                UsageLimit::new("7 j", 1.0, None, None).unwrap(),
+                UsageLimit::new("7 d", 1.0, None, None).unwrap(),
                 UsageLimit::new("7 j · Fable", 1.0, None, None).unwrap(),
             ],
             plan: None,
@@ -1920,7 +1916,7 @@ mod tests {
         assert_eq!(context_ring_color(100.0), 0xe45353);
         assert_eq!(format_percentage(68.5), "68.5");
         assert_eq!(format_window(300), "5 h");
-        assert_eq!(format_window(10_080), "7 j");
+        assert_eq!(format_window(10_080), "7 d");
     }
 
     #[test]

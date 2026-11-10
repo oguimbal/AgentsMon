@@ -1,4 +1,4 @@
-//! "Connecter OpenClaw…": the provider-menu action and its window. The shared
+//! "Connect OpenClaw…": the provider-menu action and its window. The shared
 //! gateway token typed here only lives in memory until pairing succeeds; the
 //! provider then keeps the device token the gateway mints for AgentsMon.
 
@@ -15,14 +15,14 @@ use gpui::{
 
 pub(crate) const CONNECT_ACTION: &str = "openclaw.connect";
 const STATUS_INTERVAL: Duration = Duration::from_millis(250);
-/// How long "Connecté" stays visible before the window closes.
+/// How long "Connected" stays visible before the window closes.
 const CLOSE_DELAY: Duration = Duration::from_millis(1500);
 
 pub(crate) fn menu_actions(openclaw: &OpenClawProvider) -> Vec<MenuAction> {
     if openclaw.needs_connection() {
         vec![MenuAction {
             id: CONNECT_ACTION.into(),
-            label: "Connecter OpenClaw…".into(),
+            label: "Connect OpenClaw…".into(),
         }]
     } else {
         Vec::new()
@@ -37,7 +37,7 @@ pub(crate) fn open_connect_window(
 ) -> Option<AnyWindowHandle> {
     let options = WindowOptions {
         titlebar: Some(gpui::TitlebarOptions {
-            title: Some("Connecter OpenClaw".into()),
+            title: Some("Connect OpenClaw".into()),
             appears_transparent: false,
             traffic_light_position: None,
         }),
@@ -59,24 +59,24 @@ pub(crate) fn open_connect_window(
     let handle = match cx.open_window(options, move |window, cx| {
         let view = cx.new(|cx| {
             ConnectView::new(
-                "Connecter OpenClaw".into(),
-                "AgentsMon suit vos conversations OpenClaw en lecture seule. Indiquez \
-                 l'adresse de l'interface web de la passerelle et son token : il sert \
-                 uniquement à l'appairage et n'est pas enregistré."
+                "Connect OpenClaw".into(),
+                "AgentsMon follows your OpenClaw conversations read-only. Enter the \
+                 address of the gateway web interface and its token: the token is \
+                 used for pairing only and is not saved."
                     .into(),
                 vec![
                     ConnectField {
-                        label: "Adresse de la passerelle".into(),
+                        label: "Gateway address".into(),
                         initial: initial_url,
                         masked: false,
                     },
                     ConnectField {
-                        label: "Token de la passerelle".into(),
+                        label: "Gateway token".into(),
                         initial: String::new(),
                         masked: true,
                     },
                 ],
-                "Connecter".into(),
+                "Connect".into(),
                 window,
                 cx,
             )
@@ -145,15 +145,15 @@ pub(crate) fn open_connect_window(
 fn status_for(state: &PairingState) -> ConnectStatus {
     match state {
         PairingState::Idle => ConnectStatus::Idle,
-        PairingState::Connecting => ConnectStatus::Busy("Connexion à la passerelle…".into()),
+        PairingState::Connecting => ConnectStatus::Busy("Connecting to the gateway…".into()),
         PairingState::AwaitingApproval { request_id, paused } => ConnectStatus::Waiting {
             message: if *paused {
-                "AgentsMon attend son approbation. Sur le serveur OpenClaw, lancez cette \
-                 commande puis cliquez sur « Réessayer maintenant »."
+                "AgentsMon is waiting for approval. On the OpenClaw server, run this \
+                 command, then click \"Retry now\"."
                     .into()
             } else {
-                "AgentsMon attend son approbation. Sur le serveur OpenClaw, lancez cette \
-                 commande : la connexion reprendra d'elle-même."
+                "AgentsMon is waiting for approval. On the OpenClaw server, run this \
+                 command: the connection resumes by itself."
                     .into()
             },
             command: Some(match request_id {
@@ -162,40 +162,40 @@ fn status_for(state: &PairingState) -> ConnectStatus {
             }),
         },
         PairingState::Connected => ConnectStatus::Done(
-            "Connecté. Vos conversations OpenClaw vont apparaître dans la barre.".into(),
+            "Connected. Your OpenClaw conversations will appear in the bar.".into(),
         ),
         PairingState::Failed { code } => ConnectStatus::Error(message_for(code)),
     }
 }
 
-/// French explanation of a content-free failure code, the code kept for support.
+/// Explanation of a content-free failure code, the code kept for support.
 fn message_for(code: &str) -> String {
     let explanation = match code {
         "invalid-url" => {
-            "Adresse invalide : utilisez l'URL de l'interface web, par exemple http://hote:18789/."
+            "Invalid address: use the URL of the web interface, for example http://host:18789/."
         }
-        "missing-token" => "Indiquez le token de la passerelle.",
+        "missing-token" => "Enter the gateway token.",
         "AUTH_TOKEN_MISMATCH" | "AUTH_UNAUTHORIZED" | "AUTH_PASSWORD_MISMATCH" => {
-            "Token refusé par la passerelle."
+            "The gateway refused the token."
         }
         "AUTH_RATE_LIMITED" => {
-            "Trop de tentatives : la passerelle bloque temporairement. Réessayez dans quelques minutes."
+            "Too many attempts: the gateway is blocking temporarily. Retry in a few minutes."
         }
         "resolve" | "connect" | "timeout" | "websocket-handshake" | "closed" | "read" | "send" => {
-            "Passerelle injoignable. Vérifiez l'adresse et le réseau."
+            "Gateway unreachable. Check the address and the network."
         }
         "no-device-token" => {
-            "La passerelle n'a pas délivré de jeton d'appareil : AgentsMon ne pourrait pas rester connecté."
+            "The gateway issued no device token: AgentsMon could not stay connected."
         }
-        "save-failed" => "Impossible d'enregistrer l'appairage dans le dossier de données d'AgentsMon.",
-        "pairing-timeout" => "Aucune approbation reçue après 15 minutes.",
+        "save-failed" => "Cannot save the pairing in the AgentsMon data directory.",
+        "pairing-timeout" => "No approval received after 15 minutes.",
         "PROTOCOL_MISMATCH" | "CLIENT_VERSION_MISMATCH" | "protocol-version" => {
-            "Version de passerelle incompatible avec AgentsMon (protocole 4)."
+            "Gateway version incompatible with AgentsMon (protocol 4)."
         }
         code if code.starts_with("DEVICE_AUTH_") => {
-            "La passerelle a refusé la preuve d'identité d'AgentsMon."
+            "The gateway refused AgentsMon's proof of identity."
         }
-        _ => "Connexion refusée par la passerelle.",
+        _ => "The gateway refused the connection.",
     };
     format!("{explanation} ({code})")
 }
@@ -221,6 +221,6 @@ mod tests {
     fn failures_keep_their_code() {
         assert!(message_for("DEVICE_AUTH_SIGNATURE_INVALID")
             .ends_with("(DEVICE_AUTH_SIGNATURE_INVALID)"));
-        assert!(message_for("AUTH_TOKEN_MISMATCH").starts_with("Token refusé"));
+        assert!(message_for("AUTH_TOKEN_MISMATCH").starts_with("The gateway refused the token"));
     }
 }

@@ -60,7 +60,7 @@ impl Shared {
     fn fault(&self, fault: Option<&Fault>, path: &std::path::Path, session: Option<&str>) {
         let diagnostic = fault.filter(|f| f.alert).map(|f| ProviderDiagnostic {
             code: f.code,
-            summary: "Le suivi des autorisations Codex est dégradé.",
+            summary: "Codex approval tracking is degraded.",
             details: format!("adapter=codex-desktop-ipc\nphase={}\ncode={}\n{}\nexpected_versions: initialize=0; owner={OWNER_VERSION}; follow={FOLLOW_VERSION}; stream={STREAM_VERSION}\nsocket={}\nsession={}\nframe_limit_bytes={}\nrequest_timeout_ms={}\nfallback=hooks_and_lifecycle\n", f.phase, f.code, f.detail, path.display(), session.unwrap_or("none"), protocol::MAX_FRAME, REQUEST_TIMEOUT.as_millis()),
         });
         let mut data = self.data();

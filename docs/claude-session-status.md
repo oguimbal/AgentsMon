@@ -1,57 +1,57 @@
-# États Claude et interruption avec Échap
+# Claude states and interruption with Esc
 
-Investigation et correctif du 16 septembre 2026. Ce document complète
-`codex-desktop-ipc.md` ; les deux providers partagent le journal de diagnostic,
-la fenêtre de rapport et la limite de notifications.
+Investigation and fix of 16 September 2026. This document complements
+`codex-desktop-ipc.md`; both providers share the diagnostic log, the report
+window and the notification limit.
 
-## Problème et résultats de l’investigation
+## Problem and investigation results
 
-Dans l’extension Claude de VS Code, soumettre un prompt puis interrompre la
-réponse avec Échap pouvait laisser AgentsMon vert indéfiniment. Le processus
-Claude restait vivant, ce qui est normal pour une conversation ouverte.
+In the Claude extension for VS Code, submitting a prompt and then interrupting
+the response with Esc could leave AgentsMon green indefinitely. The Claude
+process stayed alive, which is normal for an open conversation.
 
-Deux causes ont été identifiées :
+Two causes were identified:
 
-1. Le hook `Stop` ne s’exécute pas pour une interruption utilisateur. Ce
-   comportement est documenté par Anthropic, ce n’est pas une perte de watcher.
-2. `PostToolUseFailure` peut fournir `is_interrupt: true`, mais le helper
-   classait tous les échecs d’outil comme une activité en cours. Ce hook seul ne
-   couvre pas une interruption pendant la réflexion, avant tout outil.
+1. The `Stop` hook does not run for a user interruption. This behaviour is
+   documented by Anthropic; it is not a lost watcher.
+2. `PostToolUseFailure` can provide `is_interrupt: true`, but the helper
+   classified every tool failure as ongoing activity. This hook alone does not
+   cover an interruption during thinking, before any tool.
 
-Sources officielles consultées :
+Official sources consulted:
 
 - [Stop](https://code.claude.com/docs/en/hooks#stop)
 - [PostToolUseFailure](https://code.claude.com/docs/en/hooks#posttoolusefailure)
 
-La dernière trace de la session concernée était `UserPromptSubmit`, état
-`active`. Le fichier compatible Claude Status était aussi actif ; lui donner
-priorité n’aurait donc pas corrigé le problème. Aucun texte de conversation
-n’a été inspecté pour établir ce constat.
+The last trace of the affected session was `UserPromptSubmit`, state
+`active`. The Claude Status compatible file was also active; giving it
+priority would therefore not have fixed the problem. No conversation text
+was inspected to establish this finding.
 
-L’examen du code installé a révélé un registre distinct :
-`~/.claude/sessions/<pid>.json`. Il décrit le processus et, sur les versions
-récentes observées, son état courant. Le registre est lu par l’extension
-VS Code elle-même pour ses sessions ouvertes dans d’autres hôtes.
+Examining the installed code revealed a separate registry:
+`~/.claude/sessions/<pid>.json`. It describes the process and, on the recent
+versions observed, its current state. The registry is read by the VS Code
+extension itself for its sessions open in other hosts.
 
-| Version du processus observée | Résultat |
+| Process version observed | Result |
 | --- | --- |
-| 2.1.266 | Fichier présent, sans `status` ni `statusUpdatedAt` dans les deux processus encore ouverts examinés |
-| 2.1.272 | Session ouverte avec `status: idle` et horodatage ; code installé contenant la publication du statut |
-| 2.1.273 | Registre et publication du statut ; test réel isolé `busy → idle` après interruption |
+| 2.1.266 | File present, without `status` or `statusUpdatedAt` in the two still-open processes examined |
+| 2.1.272 | Session open with `status: idle` and a timestamp; installed code contains the status publication |
+| 2.1.273 | Registry and status publication; isolated real test `busy → idle` after interruption |
 
-La version de l’extension installée n’est pas nécessairement celle d’une
-conversation déjà ouverte. Le processus concerné utilisait encore 2.1.266
-alors que 2.1.273 était installé. Une fermeture/réouverture de la session Claude
-est nécessaire pour charger le nouveau binaire. AgentsMon ne redémarre pas
-Claude à la place de l’utilisateur.
+The version of the installed extension is not necessarily that of a
+conversation already open. The affected process was still using 2.1.266
+while 2.1.273 was installed. Closing and reopening the Claude session
+is required to load the new binary. AgentsMon does not restart
+Claude on the user's behalf.
 
-Ne pas transformer cette observation en une version minimale garantie : la
-première version publiant ces champs n’a pas été établie. La détection porte
-sur les capacités du fichier réel, pas sur une comparaison de versions.
+Do not turn this observation into a guaranteed minimum version: the
+first version publishing these fields has not been established. Detection is
+based on the capabilities of the actual file, not on a version comparison.
 
-## Contrat lu
+## Contract read
 
-Exemple synthétique, simplifié :
+Synthetic, simplified example:
 
 ```json
 {
@@ -65,278 +65,278 @@ Exemple synthétique, simplifié :
 }
 ```
 
-Les dates sont des millisecondes Unix. Seuls ces champs sont désérialisés.
-`name`, `detail`, `needs`, `logPath`, les chemins de sockets et les autres champs
-inconnus sont ignorés. Le lecteur ne parcourt pas de conversations et ne se
-connecte pas au socket de messagerie entre agents.
+Dates are Unix milliseconds. Only these fields are deserialized.
+`name`, `detail`, `needs`, `logPath`, socket paths and other unknown fields
+are ignored. The reader does not go through conversations and does not
+connect to the inter-agent messaging socket.
 
-| `status` | État AgentsMon |
+| `status` | AgentsMon state |
 | --- | --- |
-| `busy` | Active, vert ; conserve Compacting si le hook courant l’indique |
-| `shell` | Idle, gris : tour terminé, shell lancé en arrière-plan encore vivant ; Awaiting si le dernier hook attend un monitor (voir plus bas) |
+| `busy` | Active, green; keeps Compacting if the current hook indicates it |
+| `shell` | Idle, grey: turn finished, shell started in the background still alive; Awaiting if the last hook is waiting for a monitor (see below) |
 | `waiting` | Waiting, orange |
-| `idle` | Idle, gris |
-| valeur inconnue | Repli sur les hooks, diagnostic après persistance |
+| `idle` | Idle, grey |
+| unknown value | Fallback to hooks, diagnostic after persistence |
 
-`shell` est publié quand le tour est `idle` mais qu’au moins une tâche
-`local_bash` d’arrière-plan n’est pas terminée (serveur de dev lancé par
-l’agent, par exemple) : binaire 2.1.285, `status = idle && tâche bash vivante ?
-"shell" : status`. Si le modèle attendait ce shell, son tour serait `busy`.
-Jusqu’au 30 septembre 2026 AgentsMon l’affichait en vert, ce qui laissait une
-session terminée « active » tant que le serveur tournait.
+`shell` is published when the turn is `idle` but at least one background
+`local_bash` task is not finished (a dev server started by the agent, for
+example): binary 2.1.285, `status = idle && live bash task ?
+"shell" : status`. If the model were waiting for this shell, its turn would be `busy`.
+Until 30 September 2026 AgentsMon displayed it in green, which left a
+finished session "active" for as long as the server was running.
 
-`updatedAt` n’est **pas** utilisé : un renommage ou une autre modification de
-métadonnées peut l’avancer sans transition de statut. Le lecteur n’interprète
-pas non plus les champs d’activité textuels ou les valeurs estimées par un
-modèle.
+`updatedAt` is **not** used: a rename or another metadata change can
+advance it without a status transition. The reader does not interpret
+textual activity fields or values estimated by a model
+either.
 
-Le registre est une interface interne, sans contrat public de stabilité ni
-numéro de version de schéma. `peerProtocol` décrit une autre interface et ne
-permet pas de versionner ce fichier.
+The registry is an internal interface, with no public stability contract and
+no schema version number. `peerProtocol` describes another interface and
+cannot be used to version this file.
 
-## Attente d’un monitor ou d’un réveil (Awaiting)
+## Waiting for a monitor or a wakeup (Awaiting)
 
-Ajouté le 17 octobre 2026 (CLI 2.1.302). Une session dont le tour est terminé
-mais qui a armé de quoi se relancer est affichée **Awaiting** : vert-bleu
-(`0x2a9d8f`) avec un chronomètre sur l’indicateur de contexte. Ce n’est **pas**
-le cas d’un simple shell en arrière-plan.
+Added on 17 October 2026 (CLI 2.1.302). A session whose turn is finished
+but which has armed something to restart itself is displayed as **Awaiting**: blue-green
+(`0x2a9d8f`) with a stopwatch on the context indicator. This is **not**
+the case for a plain background shell.
 
-Constat : le hook `Stop` liste `background_tasks` (`id`, `type`, `status`,
-`description`, `command`) et `session_crons` (`id`, `schedule`, `recurring`,
-`prompt`). Dans 2.1.302, `type` vaut `shell` pour toute tâche `local_bash`, y
-compris celles de l’outil Monitor (`kind: "monitor"` en interne n’est pas
-exporté). Seuls les monitors MCP/WebSocket sortent en `monitor`. Le registre
-publie `shell` dès qu’un `local_bash` vit, monitor compris. Un dev server et un
-Monitor sont donc indiscernables par leur type, et un `Bash` lancé avec
-`run_in_background` notifie l’agent à sa fin exactement comme un dev server :
-attendre un build lancé ainsi **n’est pas détectable** sans lire la
-conversation, et reste gris.
+Finding: the `Stop` hook lists `background_tasks` (`id`, `type`, `status`,
+`description`, `command`) and `session_crons` (`id`, `schedule`, `recurring`,
+`prompt`). In 2.1.302, `type` is `shell` for every `local_bash` task,
+including those of the Monitor tool (the internal `kind: "monitor"` is not
+exported). Only MCP/WebSocket monitors come out as `monitor`. The registry
+publishes `shell` as soon as a `local_bash` is alive, monitors included. A dev server and a
+Monitor are therefore indistinguishable by their type, and a `Bash` started with
+`run_in_background` notifies the agent when it ends exactly like a dev server:
+waiting for a build started this way is **not detectable** without reading the
+conversation, and stays grey.
 
-Règle appliquée par le helper :
+Rule applied by the helper:
 
-1. `PostToolUse` de l’outil `Monitor` sans `agent_id` : seconde lecture du hook
-   limitée à `tool_response.taskId` et `persistent`. Un monitor non persistant
-   ajoute son id (opaque) à `monitor_task_ids` du record (16 au plus).
-   Les monitors persistants (surveillance de logs sans fin) sont ignorés.
-2. `Stop` : seuls les `id` des tâches et `recurring` des crons sont décodés.
-   Les ids de monitors absents de `background_tasks` sont oubliés. Si le tour
-   devait passer Idle et qu’un cron ponctuel (`recurring: false` :
-   `ScheduleWakeup`, rappel unique de `CronCreate`) existe, l’état est
-   `awaiting` / activité `wakeup` ; sinon, si un monitor retenu tourne encore,
-   `awaiting` / `monitor`. Les crons récurrents (`/loop 5m`…) restent gris.
-3. Le rappel `idle_prompt` et les hooks de sous-agents sont fusionnés comme des
-   heartbeats sur un record Awaiting.
+1. `PostToolUse` of the `Monitor` tool without `agent_id`: second read of the hook
+   limited to `tool_response.taskId` and `persistent`. A non-persistent monitor
+   adds its (opaque) id to the record's `monitor_task_ids` (16 at most).
+   Persistent monitors (endless log watching) are ignored.
+2. `Stop`: only the `id` of tasks and the `recurring` of crons are decoded.
+   Monitor ids absent from `background_tasks` are forgotten. If the turn
+   was going to become Idle and a one-shot cron (`recurring: false`:
+   `ScheduleWakeup`, single `CronCreate` reminder) exists, the state is
+   `awaiting` / activity `wakeup`; otherwise, if a retained monitor is still running,
+   `awaiting` / `monitor`. Recurring crons (`/loop 5m`…) stay grey.
+3. The `idle_prompt` reminder and subagent hooks are merged as
+   heartbeats on an Awaiting record.
 
-Côté provider, un registre plus récent `shell` conserve Awaiting ; `idle`
-le conserve seulement pour un réveil (aucun processus : le registre publie
-`idle` en fin de tour ; son ordre par rapport au hook `Stop` n’a pas été
-mesuré, les deux cas sont couverts), et le termine pour un monitor (tâche
-arrêtée sans relancer le tour). `busy` et `waiting` l’emportent normalement.
+On the provider side, a more recent `shell` registry keeps Awaiting; `idle`
+keeps it only for a wakeup (no process: the registry publishes
+`idle` at the end of the turn; its order relative to the `Stop` hook has not been
+measured, both cases are covered), and ends it for a monitor (task
+stopped without restarting the turn). `busy` and `waiting` win as usual.
 
-Vérifié en réel le 17 octobre 2026 avec un hook temporaire ne journalisant que
-les ids/types : `PostToolUse` Monitor → `{"taskId":"bfxllzues","timeoutMs":120000,"persistent":false}`,
-puis `Stop` → `background_tasks: [{"id":"bfxllzues","type":"shell","status":"running"}]`.
+Verified live on 17 October 2026 with a temporary hook logging only
+the ids/types: `PostToolUse` Monitor → `{"taskId":"bfxllzues","timeoutMs":120000,"persistent":false}`,
+then `Stop` → `background_tasks: [{"id":"bfxllzues","type":"shell","status":"running"}]`.
 
-Le passage Active → Awaiting ne déclenche pas la notification de fin de tour ;
-Awaiting → Idle/Waiting la déclenche. Le protocole local v1 n’a pas cet état :
-il est exporté `active`.
+The Active → Awaiting transition does not trigger the end-of-turn notification;
+Awaiting → Idle/Waiting triggers it. The local v1 protocol does not have this state:
+it is exported as `active`.
 
-Limites : un rappel `CronCreate` unique lointain (demain 15 h) laisse la carte
-Awaiting jusque-là ; un cron supprimé depuis l’interface, sans outil ni hook,
-la laisse Awaiting jusqu’au prompt suivant. Un monitor WebSocket/MCP n’est pas un `local_bash`, le registre
-publie alors `idle` et la carte repasse grise.
+Limits: a single `CronCreate` reminder far in the future (tomorrow at 15:00) leaves the card
+Awaiting until then; a cron deleted from the interface, without a tool or a hook,
+leaves it Awaiting until the next prompt. A WebSocket/MCP monitor is not a `local_bash`, so the registry
+then publishes `idle` and the card goes back to grey.
 
-## Ordre des événements et protections
+## Event order and safeguards
 
-Le provider découvre toujours les sessions à partir des `.cstatus` et valide
-le processus Claude. Le registre complète uniquement les sessions reconnues.
-Pour chaque session vivante :
+The provider always discovers sessions from the `.cstatus` files and validates
+the Claude process. The registry only complements recognized sessions.
+For each live session:
 
-1. Lire uniquement `sessions/<pid>.json`, dans le répertoire frère de la racine
-   `projects` du provider.
-2. Vérifier le PID et l’identifiant de session. Une session reprise ailleurs ou
-   un ancien fichier pour un PID réutilisé ne doit pas modifier la carte.
-3. Vérifier `startedAt` contre l’heure de démarrage du processus obtenue par
-   `sysinfo`. Les fichiers d’une génération de processus précédente sont ignorés.
-4. Accepter `kind: interactive` ou son absence ; ignorer les catégories connues
-   `bg`, `daemon`, `daemon-worker`. Une nouvelle catégorie déclenche un diagnostic.
-5. Vérifier que `statusUpdatedAt` n’est ni antérieur à `startedAt` ni supérieur
-   de plus de deux secondes à l’heure actuelle.
-6. Appliquer le statut seulement si `statusUpdatedAt` est strictement plus récent
-   que le dernier hook. Un prompt envoyé après un ancien `idle` redevient donc
-   immédiatement actif.
+1. Read only `sessions/<pid>.json`, in the sibling directory of the provider's
+   `projects` root.
+2. Check the PID and the session identifier. A session resumed elsewhere or
+   an old file for a reused PID must not modify the card.
+3. Check `startedAt` against the process start time obtained through
+   `sysinfo`. Files from a previous process generation are ignored.
+4. Accept `kind: interactive` or its absence; ignore the known categories
+   `bg`, `daemon`, `daemon-worker`. A new category triggers a diagnostic.
+5. Check that `statusUpdatedAt` is neither earlier than `startedAt` nor more
+   than two seconds later than the current time.
+6. Apply the status only if `statusUpdatedAt` is strictly more recent
+   than the last hook. A prompt sent after an old `idle` therefore becomes
+   active again immediately.
 
-Le helper enregistre désormais `event_timestamp` séparément de `timestamp`.
-Une actualisation de status line peut avancer `timestamp` sans changer
-`event_timestamp`, l’état ou le dernier événement. À la première actualisation
-d’un ancien record, son ancien `timestamp` sert de point de départ. Un vrai
-hook avance les deux dates. Son activité vide efface aussi l’ancien nom d’outil.
+The helper now records `event_timestamp` separately from `timestamp`.
+A status line refresh can advance `timestamp` without changing
+`event_timestamp`, the state or the last event. On the first refresh
+of an old record, its old `timestamp` is used as the starting point. A real
+hook advances both dates. Its empty activity also clears the old tool name.
 
-`PostToolUseFailure.is_interrupt: true` ramène directement à Idle si le hook ne
-porte pas d’`agent_id`. L’interruption d’un sous-agent ne prouve pas à elle seule
-la fin du tour principal. Un échec ordinaire ou un hook d’une ancienne version
-sans ce champ reste Active.
+`PostToolUseFailure.is_interrupt: true` goes straight back to Idle if the hook does not
+carry an `agent_id`. The interruption of a subagent does not by itself prove
+the end of the main turn. An ordinary failure or a hook from an old version
+without this field stays Active.
 
-Un hook portant un `agent_id` (`SubagentStart`, `SubagentStop`, outils d’un
-sous-agent…) qui calculerait Active sur un record déjà Idle est fusionné comme
-un heartbeat : état, activité, dernier événement et `event_timestamp` sont
-conservés, et un statut plus récent du registre continue de s’appliquer. Les
-demandes d’autorisation d’un sous-agent restent Waiting, et un sous-agent
-pendant un tour actif ne change rien.
+A hook carrying an `agent_id` (`SubagentStart`, `SubagentStop`, tools of a
+subagent…) that would compute Active on a record already Idle is merged as
+a heartbeat: state, activity, last event and `event_timestamp` are
+kept, and a more recent registry status still applies.
+Permission requests from a subagent stay Waiting, and a subagent
+during an active turn changes nothing.
 
-Constaté le 30 septembre 2026 sur une session CLI 2.1.285 restée verte : registre
-`idle`, puis `SubagentStop` environ trois minutes plus tard, sans transcript
-correspondant dans `subagents/`. Le binaire contient des agents internes forkés
-sans transcript (`away_summary`, `extract_memories`, `auto_dream`…) ; ce sont des
-sources possibles, l’émetteur exact n’a pas été établi. L’état AgentsMon juste
-avant ce hook, écrasé depuis, n’a pas pu être vérifié.
+Observed on 30 September 2026 on a CLI 2.1.285 session that stayed green: registry
+`idle`, then `SubagentStop` about three minutes later, with no matching
+transcript in `subagents/`. The binary contains forked internal agents
+without a transcript (`away_summary`, `extract_memories`, `auto_dream`…); these are
+possible sources, the exact emitter has not been established. The AgentsMon state just
+before this hook, overwritten since, could not be verified.
 
-Ce même cas s’est reproduit le 30 septembre 2026 (session « devops », CLI
-2.1.285, hôte Warp) malgré la fusion en heartbeat : le record n’était pas Idle
-quand `SubagentStop` est arrivé, car le hook `Stop` avait écrit `active`
-(« background task ») à cause de shells en arrière-plan. Deux corrections :
+The same case occurred again on 30 September 2026 ("devops" session, CLI
+2.1.285, Warp host) despite the heartbeat merge: the record was not Idle
+when `SubagentStop` arrived, because the `Stop` hook had written `active`
+("background task") because of background shells. Two fixes:
 
-- `Stop` ne reste Active que si `background_tasks` contient du travail
-  d’agent (`subagent`, `workflow`, `teammate`, `cloud session`). Des `shell`,
-  `monitor`, `MCP task`, `dream` ou `auto-mode scan` seuls donnent Idle
-  (ou Awaiting pour un monitor ou un réveil, voir la section dédiée). Seul
-  le champ `type` de chaque tâche est décodé ; `command` et `description`
-  contiennent du texte et ne sont pas lus.
-- Côté provider, quand le dernier hook est `SubagentStart`/`SubagentStop`, un
-  registre `idle`/`shell` s’applique même s’il est plus ancien que ce hook. Un
-  tour principal repris republie `busy`, qui reste soumis à la règle normale.
+- `Stop` stays Active only if `background_tasks` contains agent
+  work (`subagent`, `workflow`, `teammate`, `cloud session`). `shell`,
+  `monitor`, `MCP task`, `dream` or `auto-mode scan` tasks alone give Idle
+  (or Awaiting for a monitor or a wakeup, see the dedicated section). Only
+  the `type` field of each task is decoded; `command` and `description`
+  contain text and are not read.
+- On the provider side, when the last hook is `SubagentStart`/`SubagentStop`, an
+  `idle`/`shell` registry applies even if it is older than this hook. A
+  resumed main turn republishes `busy`, which remains subject to the normal rule.
 
-Même mécanisme le 1er octobre 2026 sur une session VS Code 2.1.281 (« edf ») :
-registre `waiting` (question posée), puis `SubagentStop` quatre minutes plus
-tard, et la carte repassait verte. La protection couvre donc aussi l’attente :
+Same mechanism on 1 October 2026 on a VS Code 2.1.281 session ("edf"):
+registry `waiting` (question asked), then `SubagentStop` four minutes
+later, and the card went back to green. The safeguard therefore also covers waiting:
 
-- côté provider, un registre `waiting` s’applique lui aussi sur un hook
-  `SubagentStart`/`SubagentStop` plus récent ;
-- côté helper, le record retient si son dernier hook venait d’un sous-agent
-  (`subagent`). Un hook de sous-agent Active est fusionné en heartbeat sur un
-  record Idle, ou Waiting **du tour principal**. Une demande d’autorisation
-  émise par un sous-agent se termine toujours quand ce sous-agent reprend.
+- on the provider side, a `waiting` registry also applies over a more recent
+  `SubagentStart`/`SubagentStop` hook;
+- on the helper side, the record remembers whether its last hook came from a subagent
+  (`subagent`). An Active subagent hook is merged as a heartbeat on an
+  Idle record, or a Waiting one **from the main turn**. A permission request
+  issued by a subagent always ends when that subagent resumes.
 
-Hook `Notification` : seuls `permission_prompt`, `worker_permission_prompt`,
-`elicitation_dialog`, `elicitation_url_dialog` et `agent_needs_input` (ou une
-notification sans type, anciennes versions) donnent Waiting. `idle_prompt`,
-envoyé une minute après un tour terminé resté sans réponse, donne Idle ; les
-records écrits avant le 1er octobre 2026 avec ce type sont aussi lus Idle.
-`auth_success` reste Active. Les autres types (`agent_completed`,
+`Notification` hook: only `permission_prompt`, `worker_permission_prompt`,
+`elicitation_dialog`, `elicitation_url_dialog` and `agent_needs_input` (or a
+notification without a type, old versions) give Waiting. `idle_prompt`,
+sent one minute after a finished turn left unanswered, gives Idle;
+records written before 1 October 2026 with this type are also read as Idle.
+`auth_success` stays Active. The other types (`agent_completed`,
 `push_notification`, `quota_auto_resume_*`, `computer_use_*`,
-`model_refusal_fallback`, futurs types) ne changent pas l’état : ils sont
-fusionnés comme un heartbeat. Liste relevée dans le binaire 2.1.285.
+`model_refusal_fallback`, future types) do not change the state: they are
+merged as a heartbeat. List taken from binary 2.1.285.
 
-Limite connue : si un tel agent demande une autorisation après la fin du tour,
-la carte passe Waiting puis son `PostToolUse` suivant la remet Active.
+Known limit: if such an agent requests a permission after the end of the turn,
+the card becomes Waiting, then its next `PostToolUse` sets it back to Active.
 
-Les données restent dans le provider Claude et le helper. Le store, le rendu
-GPUI, les autres panneaux et l’export local reçoivent le même `AgentSnapshot`
-que pour les autres sources. Aucun comportement Claude n’est ajouté à l’UI.
+The data stays in the Claude provider and the helper. The store, the GPUI
+rendering, the other panels and the local export receive the same `AgentSnapshot`
+as for the other sources. No Claude behaviour is added to the UI.
 
-## Résilience et limites
+## Resilience and limits
 
-- Maximum 256 Kio par fichier, y compris si celui-ci grossit pendant la lecture.
-- Fichiers réguliers uniquement ; liens symboliques, répertoires et FIFO refusés.
-  Unix ajoute `O_NOFOLLOW | O_NONBLOCK` à l’ouverture pour fermer la course avec
-  un remplacement par un lien ou un FIFO. Sur Windows, le contrôle initial et
-  celui du handle sont appliqués ; cette protection Unix supplémentaire n’existe
-  pas dans cette implémentation Windows.
-- Les lectures sont de petites lectures locales synchrones, sans commande
-  externe, attente réseau ou boucle de polling interne. Comme les `.cstatus`,
-  elles dépendent néanmoins de la réactivité du système de fichiers local.
-- JSON partiel, erreur d’accès, champ incompatible, horodatage incohérent : aucun
-  panic, aucun ancien `idle` conservé en cache, repli sur le dernier hook.
-- Un fichier absent n’est pas un incident : anciennes versions, démarrage et
-  arrêt normal peuvent tous expliquer cette absence. Une disparition silencieuse
-  du registre entier ne peut donc pas être distinguée d’un cas normal.
-- Un fichier présent sans statut pour une session non Idle produit un diagnostic
-  explicite après le délai ci-dessous. Il peut s’agir d’une ancienne version,
-  d’une fonctionnalité désactivée ou d’une évolution du format.
-- Le watcher observe également le répertoire `sessions` s’il existe. Le
-  rafraîchissement ordinaire de dix secondes couvre sa création ultérieure ou
-  l’échec du watcher. Quand le watcher fonctionne, les changements sont regroupés
-  avec les autres événements (rafraîchissement au plus une fois par seconde).
-- Aucun délai de silence, taux CPU ou temps d’exécution d’un outil ne signifie
-  « interrompu ». Un long calcul reste actif.
-- Le lecteur conserve un ordre temporel conservateur : un hook plus récent gagne
-  sur un registre plus ancien. Un hook tardif émis après la publication d’Idle
-  peut donc demander une nouvelle transition du registre pour être corrigé.
-- Les horloges locales sont supposées cohérentes ; les valeurs incohérentes sont
-  ignorées ou signalées, sans inventer une transition.
-- La prise en charge du registre ne rend pas les sessions WSL détectables depuis
-  Windows ; cette limite du provider demeure.
+- Maximum 256 KiB per file, including if it grows during the read.
+- Regular files only; symbolic links, directories and FIFOs are refused.
+  Unix adds `O_NOFOLLOW | O_NONBLOCK` on open to close the race with
+  a replacement by a link or a FIFO. On Windows, the initial check and
+  the handle check are applied; this additional Unix protection does not exist
+  in this Windows implementation.
+- Reads are small synchronous local reads, with no external
+  command, network wait or internal polling loop. Like the `.cstatus` files,
+  they nevertheless depend on the responsiveness of the local file system.
+- Partial JSON, access error, incompatible field, inconsistent timestamp: no
+  panic, no old `idle` kept in cache, fallback to the last hook.
+- A missing file is not an incident: old versions, startup and
+  normal shutdown can all explain this absence. A silent disappearance
+  of the whole registry therefore cannot be distinguished from a normal case.
+- A file present without a status for a non-Idle session produces an explicit
+  diagnostic after the delay below. It may be an old version,
+  a disabled feature or a change of format.
+- The watcher also observes the `sessions` directory if it exists. The
+  ordinary ten-second refresh covers its later creation or
+  a watcher failure. When the watcher works, changes are grouped
+  with the other events (refresh at most once per second).
+- No silence delay, CPU usage or tool execution time means
+  "interrupted". A long computation stays active.
+- The reader keeps a conservative time order: a more recent hook wins
+  over an older registry. A late hook emitted after Idle was published
+  may therefore need a new registry transition to be corrected.
+- Local clocks are assumed consistent; inconsistent values are
+  ignored or reported, without inventing a transition.
+- Registry support does not make WSL sessions detectable from
+  Windows; this provider limit remains.
 
-## Diagnostics et notifications
+## Diagnostics and notifications
 
-Un même problème doit être observé pendant au moins quinze secondes avant
-d’être exposé à l’application. Cette temporisation filtre notamment les fichiers
-tronqués pendant une écriture en place. Une lecture valide ou l’absence de
-problème remet ce délai à zéro. Si plusieurs sessions sont concernées, la
-première selon l’ordre stable des identifiants est signalée ; les autres sont
-examinées également et conservent leur repli individuel.
+The same problem must be observed for at least fifteen seconds before
+being exposed to the application. This delay filters out, in particular, files
+truncated during an in-place write. A valid read or the absence of a
+problem resets this delay to zero. If several sessions are affected, the
+first one in the stable order of identifiers is reported; the others are
+examined as well and keep their individual fallback.
 
-| Code | Interprétation |
+| Code | Interpretation |
 | --- | --- |
-| `claude.registry.schema` | JSON ou champs requis incompatibles/incomplets |
-| `claude.registry.read` | Erreur d’accès/lecture ou croissance au-delà de la limite |
-| `claude.registry.file` | Type de fichier ou taille initiale refusé |
-| `claude.registry.kind` | Catégorie de session inconnue |
-| `claude.registry.status` | Valeur de statut inconnue |
-| `claude.registry.timestamp` | Ordre ou plage des dates incohérents |
-| `claude.registry.status_unavailable` | Fichier sans état complet pour une session non Idle ; relancer Claude avec une version récente |
+| `claude.registry.schema` | JSON or required fields incompatible/incomplete |
+| `claude.registry.read` | Access/read error or growth beyond the limit |
+| `claude.registry.file` | File type or initial size refused |
+| `claude.registry.kind` | Unknown session category |
+| `claude.registry.status` | Unknown status value |
+| `claude.registry.timestamp` | Inconsistent order or range of dates |
+| `claude.registry.status_unavailable` | File without a complete state for a non-Idle session; restart Claude with a recent version |
 
-Les erreurs Serde peuvent contenir une valeur issue de l’entrée : elles ne sont
-jamais copiées dans les logs. Les diagnostics contiennent des codes et textes
-fixes, le chemin du fichier et le PID. Pour le cas sans statut, la version peut
-être ajoutée seulement si elle comporte au maximum 32 caractères, tous chiffres
-ou points. Aucun dump du JSON, nom de conversation ou message d’erreur Claude
-n’est stocké.
+Serde errors can contain a value taken from the input: they are
+never copied into the logs. Diagnostics contain fixed codes and texts,
+the file path and the PID. For the case without a status, the version can
+be added only if it has at most 32 characters, all digits
+or dots. No JSON dump, conversation name or Claude error message
+is stored.
 
-Le mécanisme commun `connection_diagnostics.rs` :
+The shared mechanism `connection_diagnostics.rs`:
 
-- journalise explicitement l’incident, sa persistance et sa disparition ;
-- conserve les rapports et la dernière tentative de notification sur disque ;
-- limite les notifications de diagnostic à **une par heure au total**, Claude
-  et Codex confondus, y compris après un redémarrage ;
-- ouvre un rapport copiable au clic sur la notification ; le menu
-  **AgentsMon → Diagnostic des connexions…** ouvre aussi les rapports.
+- explicitly logs the incident, its persistence and its disappearance;
+- keeps the reports and the last notification attempt on disk;
+- limits diagnostic notifications to **one per hour in total**, Claude
+  and Codex combined, including after a restart;
+- opens a copyable report when the notification is clicked; the menu
+  **AgentsMon → Connection diagnostics…** also opens the reports.
 
-Sur macOS, les fichiers se trouvent dans
-`~/Library/Application Support/com.oliv.AgentsMon/diagnostics/` :
-`provider-diagnostics.log`, son archive `.1`, et `provider-diagnostics.json`.
-Le chemin réellement utilisé est rappelé dans le rapport. Le journal tourne à
-512 Kio. Les permissions système peuvent empêcher une notification native ;
-les logs et le menu restent utilisables. Voir `codex-desktop-ipc.md` pour les
-limites de livraison et de clic des notifications.
+On macOS, the files are located in
+`~/Library/Application Support/fr.gmbl.AgentsMon/diagnostics/`:
+`provider-diagnostics.log`, its `.1` archive, and `provider-diagnostics.json`.
+The path actually used is stated in the report. The log rotates at
+512 KiB. System permissions can prevent a native notification;
+the logs and the menu remain usable. See `codex-desktop-ipc.md` for the
+delivery and click limits of notifications.
 
-## Retrouver le contrat après une mise à jour
+## Finding the contract again after an update
 
-1. Relever la version dans le fichier du **processus concerné**, pas uniquement
-   dans `claude --version` ou le `package.json` de l’extension.
-2. Examiner seulement les champs de métadonnées listés plus haut dans
-   `~/.claude/sessions/<pid>.json` et le record AgentsMon correspondant. Ne pas
-   chercher `[Request interrupted by user]` dans les messages : cette approche
-   enfreindrait la règle de confidentialité et dépendrait d’un texte d’affichage.
-3. Dans `~/.vscode/extensions/anthropic.claude-code-<version>-<plateforme>/extension.js`,
-   rechercher `liveRegistry`, `session_state_changed`, `sessions`, `busy`,
-   `waiting`. Le lecteur installé observé reconnaît quatre états :
+1. Read the version from the file of the **affected process**, not only
+   from `claude --version` or the extension's `package.json`.
+2. Examine only the metadata fields listed above in
+   `~/.claude/sessions/<pid>.json` and the corresponding AgentsMon record. Do not
+   search for `[Request interrupted by user]` in the messages: this approach
+   would break the confidentiality rule and would depend on a display text.
+3. In `~/.vscode/extensions/anthropic.claude-code-<version>-<platform>/extension.js`,
+   search for `liveRegistry`, `session_state_changed`, `sessions`, `busy`,
+   `waiting`. The installed reader observed recognizes four states:
    `busy`, `shell`, `idle`, `waiting`.
-4. Dans `resources/native-binary/claude`, le JavaScript embarqué observé est
-   encore visible. Chercher `statusUpdatedAt`, la publication de
-   `{status: ..., waitingFor: ...}`, puis ses appelants. Les noms minifiés changent.
-   En 2.1.273, la fonction observée `Bfe` ajoute les dates et écrit le registre ;
-   `Hh` relie le lifecycle headless aux valeurs `busy`/`waiting`/`idle`.
-5. L’extension envoie une requête de contrôle `{subtype: "interrupt"}` lorsqu’on
-   interrompt une session. Le test isolé ci-dessous reproduit cette frontière
-   sans toucher à une session utilisateur.
-6. Adapter uniquement le lecteur typé et ses tests. Un changement de schéma ne
-   justifie pas de désérialiser le fichier entier en `serde_json::Value` ni de
-   remplacer le statut explicite par un timeout d’inactivité.
+4. In `resources/native-binary/claude`, the embedded JavaScript observed is
+   still visible. Look for `statusUpdatedAt`, the publication of
+   `{status: ..., waitingFor: ...}`, then its callers. Minified names change.
+   In 2.1.273, the observed function `Bfe` adds the dates and writes the registry;
+   `Hh` links the headless lifecycle to the `busy`/`waiting`/`idle` values.
+5. The extension sends a control request `{subtype: "interrupt"}` when
+   a session is interrupted. The isolated test below reproduces this boundary
+   without touching a user session.
+6. Adapt only the typed reader and its tests. A schema change does not
+   justify deserializing the whole file into `serde_json::Value` or
+   replacing the explicit status with an inactivity timeout.
 
-## Vérification reproductible
+## Reproducible verification
 
-Tests déterministes :
+Deterministic tests:
 
 ```sh
 cargo test -p agentsmon-providers claude_runtime
@@ -347,38 +347,38 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-Les tests couvrent l’interruption sans Stop, le prompt suivant, les quatre
-statuts, la compaction, le silence prolongé, les identifiants/PID incorrects,
-les générations de processus, les catégories exclues, les anciennes versions,
-les dates invalides, JSON tronqué, données trop volumineuses, liens/FIFO et le
-délai de diagnostic/récupération. Le helper vérifie aussi le champ interruption,
-les sous-agents, l’échec ordinaire et les heartbeats de status line.
+The tests cover interruption without Stop, the next prompt, the four
+statuses, compaction, prolonged silence, incorrect identifiers/PIDs,
+process generations, excluded categories, old versions,
+invalid dates, truncated JSON, oversized data, links/FIFOs and the
+diagnostic/recovery delay. The helper also checks the interruption field,
+subagents, ordinary failure and status line heartbeats.
 
-Test avec le vrai binaire Claude installé (opt-in) :
+Test with the real installed Claude binary (opt-in):
 
 ```sh
-python3 scripts/test-claude-interruption.py --claude /chemin/vers/claude
+python3 scripts/test-claude-interruption.py --claude /path/to/claude
 ```
 
-Le script crée une configuration temporaire, utilise `--bare`, une fausse clé
-et un serveur HTTP sur `127.0.0.1`. Le serveur maintient une réponse SSE ouverte,
-le script attend `busy`, envoie le contrôle d’interruption puis attend `idle`.
-Les outils, plugins, MCP et persistance de session sont désactivés. Les variables
-d’authentification et de sélection de provider du parent ne sont pas héritées.
-Le processus est arrêté dans `finally`, même si le test échoue. Aucun compte
-ni API de modèle réelle n’est utilisé ; seules les métadonnées de statut sont
-imprimées. Les sorties brutes de Claude sont ignorées.
+The script creates a temporary configuration, uses `--bare`, a fake key
+and an HTTP server on `127.0.0.1`. The server keeps an SSE response open,
+the script waits for `busy`, sends the interruption control, then waits for `idle`.
+Tools, plugins, MCP and session persistence are disabled. The parent's
+authentication and provider selection variables are not inherited.
+The process is stopped in `finally`, even if the test fails. No account
+or real model API is used; only status metadata is
+printed. Raw Claude output is ignored.
 
-Exécuté avec succès le 16 septembre 2026 sur le binaire de l’extension VS Code
-2.1.273 : `busy → idle` durant une requête modèle synthétique. Cela valide la
-frontière d’interruption headless utilisée par VS Code ; ce n’est pas un test
-GUI de l’acheminement de la touche Échap.
+Run successfully on 16 September 2026 on the binary of the VS Code extension
+2.1.273: `busy → idle` during a synthetic model request. This validates the
+headless interruption boundary used by VS Code; it is not a GUI
+test of the routing of the Esc key.
 
-Contrôle manuel après déploiement : relancer AgentsMon, rouvrir la session
-Claude avec le binaire récent, envoyer un prompt, interrompre pendant la
-réflexion, puis envoyer un nouveau prompt. Attendre gris après interruption,
-vert au nouveau prompt. Refaire pendant un outil et une demande d’autorisation.
-Ne pas interrompre une session utilisateur automatiquement pour tester.
+Manual check after deployment: restart AgentsMon, reopen the Claude
+session with the recent binary, send a prompt, interrupt during
+thinking, then send a new prompt. Expect grey after the interruption,
+green at the new prompt. Repeat during a tool and a permission request.
+Do not interrupt a user session automatically to test.
 
-Dans une session CLI, terminer un tour, vérifier gris, puis laisser le terminal
-sans interaction plus de trois minutes : la carte doit rester grise.
+In a CLI session, finish a turn, check grey, then leave the terminal
+without interaction for more than three minutes: the card must stay grey.

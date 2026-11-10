@@ -13,7 +13,7 @@ mod notification;
 
 actions!(diagnostic_preview, [Quit]);
 
-const REPORT: &str = "TEST LOCAL — exemple synthétique, aucune panne réelle détectée.\n\nDiagnostique et corrige le suivi des états dans AgentsMon pour Codex.\nConsulte d’abord docs/codex-desktop-ipc.md.\nPréserve le repli sur les hooks et ne décode aucun contenu de conversation.\n\nAgentsMon : 0.1.0\nIncident : stream_version_changed\nLe suivi des autorisations Codex est dégradé.\nPremière observation : 2026-09-16T18:45:23+00:00\nDernière observation enregistrée : 2026-09-16T19:19:00+00:00\n\nadapter=codex-desktop-ipc\nphase=snapshot\ncode=stream_version_changed\nexpected=11; observed=Some(12)\nexpected_versions: initialize=0; owner=1; follow=1; stream=11\nsocket=/chemin/exemple/.codex/ipc/ipc.sock\nsession=00000000-0000-0000-0000-000000000001\nframe_limit_bytes=16777216\nrequest_timeout_ms=3000\nfallback=hooks_and_lifecycle\n\nJournal persistant : /chemin/exemple/diagnostics/provider-diagnostics.log\nJournal précédent : /chemin/exemple/diagnostics/provider-diagnostics.log.1\n\nCes détails contiennent uniquement des métadonnées techniques.\nAucune autorisation n’a été acceptée ou refusée par AgentsMon.";
+const REPORT: &str = "LOCAL TEST — synthetic example, no real failure detected.\n\nDiagnose and fix state tracking in AgentsMon for Codex.\nRead docs/codex-desktop-ipc.md first.\nKeep the hook fallback and decode no conversation content.\n\nAgentsMon: 0.1.0\nIncident: stream_version_changed\nCodex approval tracking is degraded.\nFirst seen: 2026-09-16T18:45:23+00:00\nLast recorded observation: 2026-09-16T19:19:00+00:00\n\nadapter=codex-desktop-ipc\nphase=snapshot\ncode=stream_version_changed\nexpected=11; observed=Some(12)\nexpected_versions: initialize=0; owner=1; follow=1; stream=11\nsocket=/example/path/.codex/ipc/ipc.sock\nsession=00000000-0000-0000-0000-000000000001\nframe_limit_bytes=16777216\nrequest_timeout_ms=3000\nfallback=hooks_and_lifecycle\n\nPersistent log: /example/path/diagnostics/provider-diagnostics.log\nPrevious log: /example/path/diagnostics/provider-diagnostics.log.1\n\nThese details contain technical metadata only.\nAgentsMon accepted or refused no permission.";
 
 fn show(cx: &mut App, slot: &RefCell<Option<AnyWindowHandle>>, title: String, report: String) {
     if let Some(window) = slot.borrow_mut().take() {
@@ -44,12 +44,12 @@ fn show(cx: &mut App, slot: &RefCell<Option<AnyWindowHandle>>, title: String, re
 fn main() {
     gpui_platform::application().run(|cx| {
         cx.on_action(|_: &Quit, cx| cx.quit());
-        cx.set_menus([Menu::new("Diagnostic de test").items([MenuItem::action("Quitter", Quit)])]);
+        cx.set_menus([Menu::new("Diagnostic de test").items([MenuItem::action("Quit", Quit)])]);
         let slot = Rc::new(RefCell::new(None));
         show(
             cx,
             &slot,
-            "Diagnostic des connexions — TEST".into(),
+            "Connection diagnostics — TEST".into(),
             REPORT.into(),
         );
         if std::env::args().any(|arg| arg == "--notify") {

@@ -1,6 +1,6 @@
 # AgentsMon
 
-AgentsMon is a small, always-on-top desktop monitor for local coding agents. It is written in Rust with [GPUI](https://www.gpui.rs/) and currently supports Claude Code, Codex and Mistral Vibe on macOS and Windows.
+AgentsMon is a small, always-on-top desktop monitor for local coding agents. It is written in Rust with [GPUI](https://www.gpui.rs/) and currently supports Claude Code, Codex, Mistral Vibe and OpenClaw on macOS and Windows.
 
 Each physical display gets the same low-profile bar in its bottom-left corner. Every running session shows:
 
@@ -87,7 +87,7 @@ Clicking a Codex card opens the exact task through the native `codex://threads/<
 
 On macOS/Unix, AgentsMon also samples the desktop's private local IPC to detect explicit `waitingOnApproval` and `waitingOnUserInput` states, including Computer Use permissions that do not emit a waiting hook. A slow tool alone never turns orange. Socket reads run in a separate worker with size/time limits, fresh metadata only, and fallback to hooks/lifecycle on disconnect or an incompatible protocol. Windows retains the hook-based integration.
 
-Detected protocol incompatibilities produce a persistent diagnostic log and at most one diagnostic notification per hour, including across restarts. Clicking it opens a report with a **Copy diagnostic prompt** button (French UI: **Copier le prompt de diagnostic**). Reports also remain available in **AgentsMon → Diagnostic des connexions…**. The journal is `diagnostics/provider-diagnostics.log` under the application data directory, with one rotated `.1` file. See [Codex desktop IPC maintenance](docs/codex-desktop-ipc.md) for the observed protocol, investigation history, safeguards, limitations, log locations and reproduction commands.
+Detected protocol incompatibilities produce a persistent diagnostic log and at most one diagnostic notification per hour, including across restarts. Clicking it opens a report with a **Copy diagnostic prompt** button. Reports also remain available in **AgentsMon → Connection diagnostics…**. The journal is `diagnostics/provider-diagnostics.log` under the application data directory, with one rotated `.1` file. See [Codex desktop IPC maintenance](docs/codex-desktop-ipc.md) for the observed protocol, investigation history, safeguards, limitations, log locations and reproduction commands.
 
 ## Mistral Vibe integration
 
@@ -107,6 +107,20 @@ Run `python3 scripts/test-vibe-observer.py` for the adapter tests. Run it with V
 
 The integration follows Mistral's [hook definitions](https://github.com/mistralai/mistral-vibe/blob/main/vibe/core/hooks/models.py) and [2.21 hook migration](https://github.com/mistralai/mistral-vibe/blob/main/CHANGELOG.md#2210---2026-07-17).
 
+## OpenClaw integration
+
+**Connect OpenClaw…** in a provider menu pairs AgentsMon with an OpenClaw Gateway. AgentsMon asks for the `operator.read` scope only, lists sessions with `sessions.list` and never subscribes to session events. Titles come from `label` / `displayName`; message previews, derived titles and activity summaries are not decoded.
+
+The gateway token typed in the connect window is used for pairing and is not saved. The device token minted by the gateway is saved in `openclaw-device.json` under the application data directory, next to `openclaw.json` (gateway URL). A refused credential parks the connection instead of retrying. See [OpenClaw Gateway](docs/openclaw-gateway.md).
+
+## Account usage
+
+On macOS, the Claude provider menu shows the 5-hour and 7-day quotas of the signed-in Claude account. AgentsMon reads the Claude Code OAuth credential from the macOS Keychain (`Claude Code-credentials`) and sends it to `https://api.anthropic.com/api/oauth/usage`. The credential is not stored or logged by AgentsMon. Codex quotas come from the rate-limit metadata Codex writes locally.
+
+## Local source for other applications
+
+While it runs, AgentsMon publishes the visible sessions (names, states, unread flags, context percentage) on a per-user Unix socket, and accepts focus requests for them. [LeSwitcheur](https://github.com/oguimbal/LeSwitcheur) uses it to list agent sessions in its switcher. The contract is in [`crates/local-source-ipc`](crates/local-source-ipc/README.md). No conversation content is exported. Windows exposes no local source yet.
+
 ## Workspace
 
 | Crate | Role |
@@ -121,4 +135,9 @@ The Claude plugin and local marketplace live in `claude-plugin/` and `.claude-pl
 
 ## Privacy
 
-AgentsMon does not parse message content. It reads `.cstatus` metadata, lifecycle hook metadata and context-window metrics needed for session identity and context percentage. Nothing is uploaded.
+AgentsMon does not parse message content. It reads `.cstatus` metadata, lifecycle hook metadata and context-window metrics needed for session identity and context percentage. There is no analytics and no AgentsMon server.
+
+Network requests are limited to:
+
+- the Claude usage request described in [Account usage](#account-usage) (macOS, when a Claude Code credential exists);
+- the WebSocket to an OpenClaw Gateway you paired yourself.

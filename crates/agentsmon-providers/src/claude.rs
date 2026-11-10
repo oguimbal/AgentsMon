@@ -534,15 +534,15 @@ fn provider_usage_from_api(response: ClaudeUsageResponse) -> Option<ProviderUsag
         .into_iter()
         .filter_map(|limit| {
             let (label, window_minutes) = match (limit.kind.as_str(), limit.group.as_str()) {
-                ("session", _) => ("Quota 5 heures".to_string(), Some(300)),
-                ("weekly_all", _) => ("Quota 7 jours".to_string(), Some(10_080)),
+                ("session", _) => ("5-hour quota".to_string(), Some(300)),
+                ("weekly_all", _) => ("7-day quota".to_string(), Some(10_080)),
                 ("weekly_scoped", _) => {
                     let scope = limit
                         .scope
                         .and_then(|scope| scope.model)
                         .and_then(|model| model.display_name)
-                        .unwrap_or_else(|| "modèle".into());
-                    (format!("Quota 7 jours · {scope}"), Some(10_080))
+                        .unwrap_or_else(|| "model".into());
+                    (format!("7-day quota · {scope}"), Some(10_080))
                 }
                 _ => return None,
             };
@@ -661,11 +661,11 @@ mod tests {
         let usage = provider_usage_from_api(response).unwrap();
 
         assert_eq!(usage.limits.len(), 3);
-        assert_eq!(usage.limits[0].label, "Quota 5 heures");
+        assert_eq!(usage.limits[0].label, "5-hour quota");
         assert_eq!(usage.limits[0].used_percentage(), 3.0);
-        assert_eq!(usage.limits[1].label, "Quota 7 jours");
+        assert_eq!(usage.limits[1].label, "7-day quota");
         assert_eq!(usage.limits[1].used_percentage(), 20.0);
-        assert_eq!(usage.limits[2].label, "Quota 7 jours · Fable");
+        assert_eq!(usage.limits[2].label, "7-day quota · Fable");
         assert_eq!(usage.limits[2].used_percentage(), 36.0);
     }
 

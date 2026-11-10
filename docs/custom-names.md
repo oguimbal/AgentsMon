@@ -1,38 +1,38 @@
-# Noms personnalisés persistants
+# Persistent custom names
 
-Depuis le correctif du 17 septembre 2026, les noms saisis dans la fenêtre
-« Renommer » d’AgentsMon sont des préférences persistantes. Auparavant, ils
-étaient uniquement en mémoire et étaient aussi supprimés lorsque la session
-disparaissait du snapshot d’un provider.
+Since the fix of 17 September 2026, the names entered in the AgentsMon
+"Rename" window are persistent preferences. Previously, they
+were held in memory only and were also deleted when the session
+disappeared from a provider's snapshot.
 
-## Comportement
+## Behaviour
 
-- Un nom de session est associé au couple provider / identifiant de session.
-  Il revient quand la même session est reprise, même après un redémarrage.
-  Une nouvelle conversation portant un autre identifiant conserve son propre nom.
-- Un nom de groupe est associé à sa clé de regroupement, actuellement le chemin
-  du répertoire de travail. Il s’applique quand un groupe se reforme dans ce
-  répertoire, même avec de nouvelles conversations. Un chemin différent désigne
-  un groupe différent ; aucun rapprochement automatique de chemins n’est fait.
-- Un groupe réduit à une seule session devient une carte de session, conformément
-  au rendu existant. Son nom de groupe reste enregistré et revient dès que le
-  groupe contient de nouveau plusieurs membres.
-- Les préférences survivent aux snapshots vides, aux sessions masquées et aux
-  périodes où aucun agent ne tourne. Elles n’expirent pas automatiquement.
-- Valider un nom vide supprime la personnalisation enregistrée et rétablit le
-  nom de projet utilisé par défaut. Annuler la fenêtre ne change rien.
-- Le renommage est immédiatement diffusé à tous les panneaux et à l’IPC local,
-  comme auparavant. Les noms restent gérés par AgentsMon ; ils ne renomment pas
-  la conversation dans Claude ou Codex.
+- A session name is associated with the provider / session identifier pair.
+  It comes back when the same session is resumed, even after a restart.
+  A new conversation with a different identifier keeps its own name.
+- A group name is associated with its grouping key, currently the path
+  of the working directory. It applies when a group forms again in that
+  directory, even with new conversations. A different path designates
+  a different group; no automatic matching of paths is done.
+- A group reduced to a single session becomes a session card, in line
+  with the existing rendering. Its group name stays saved and comes back as soon as the
+  group contains several members again.
+- Preferences survive empty snapshots, hidden sessions and
+  periods when no agent is running. They do not expire automatically.
+- Submitting an empty name removes the saved customization and restores the
+  project name used by default. Cancelling the window changes nothing.
+- The rename is immediately broadcast to all panels and to the local IPC,
+  as before. Names remain managed by AgentsMon; they do not rename
+  the conversation in Claude or Codex.
 
-## Stockage
+## Storage
 
-Sur macOS :
-`~/Library/Application Support/com.oliv.AgentsMon/custom-names.json`.
-Sur les autres plateformes, utiliser le `data_dir` de
-`directories::ProjectDirs::from("com", "oliv", "AgentsMon")`.
+On macOS:
+`~/Library/Application Support/fr.gmbl.AgentsMon/custom-names.json`.
+On other platforms, use the `data_dir` of
+`directories::ProjectDirs::from("fr", "gmbl", "AgentsMon")`.
 
-Exemple synthétique :
+Synthetic example:
 
 ```json
 {
@@ -40,66 +40,66 @@ Exemple synthétique :
   "sessions": [
     {
       "id": { "provider": "claude", "session_id": "session-id" },
-      "name": "Tests API"
+      "name": "API tests"
     }
   ],
   "groups": [
     {
-      "key": { "Directory": "/chemin/du/projet" },
-      "name": "Projet local"
+      "key": { "Directory": "/path/to/project" },
+      "name": "Local project"
     }
   ]
 }
 ```
 
-Seuls les noms saisis dans AgentsMon et leurs clés sont enregistrés. Aucun
-snapshot, état d’activité, titre fourni par un provider, message, PID ou cible
-de focus n’entre dans ce fichier. Les sessions masquées conservent leur fichier
-distinct `hidden-sessions.json`. L’ordre des cartes reste en mémoire.
+Only the names entered in AgentsMon and their keys are saved. No
+snapshot, activity state, provider-supplied title, message, PID or focus
+target goes into this file. Hidden sessions keep their separate
+file `hidden-sessions.json`. Card order stays in memory.
 
-`AgentStore` expose les préférences triées via `custom_names()` et les restaure
-avant le premier snapshot via `restore_custom_names()`. Il ne fait aucune E/S.
-`agentsmon/src/custom_names.rs` porte la lecture et l’écriture au niveau de
-l’application ; le rendu et les providers ne changent pas.
+`AgentStore` exposes the sorted preferences through `custom_names()` and restores them
+before the first snapshot through `restore_custom_names()`. It does no I/O.
+`agentsmon/src/custom_names.rs` handles reading and writing at the
+application level; the rendering and the providers do not change.
 
-## Durabilité et erreurs
+## Durability and errors
 
-La sauvegarde a lieu pendant le broadcast consécutif au renommage, avant le
-retour au traitement des événements. Elle ne dépend pas d’un callback de
-fermeture : tuer le processus après validation ne doit pas perdre le nom.
-Les broadcasts suivants n’écrivent rien quand les préférences sont inchangées.
+The save happens during the broadcast that follows the rename, before
+returning to event processing. It does not depend on a close
+callback: killing the process after submitting must not lose the name.
+Subsequent broadcasts write nothing when the preferences are unchanged.
 
-Chaque écriture utilise un fichier temporaire unique, puis `sync_all` et un
-remplacement atomique. Sur Unix, le fichier est créé avec le mode `0600` et le
-répertoire est synchronisé si le système de fichiers le permet. Sur Windows,
-le handle temporaire est fermé avant `MoveFileExW` avec remplacement et
-`WRITE_THROUGH`. Une écriture échouée ne remplace pas le dernier fichier valide.
+Each write uses a unique temporary file, then `sync_all` and an
+atomic replacement. On Unix, the file is created with mode `0600` and the
+directory is synced if the file system allows it. On Windows,
+the temporary handle is closed before `MoveFileExW` with replacement and
+`WRITE_THROUGH`. A failed write does not replace the last valid file.
 
-Une erreur de sauvegarde laisse les noms en mémoire et écrit un avertissement
-explicite dans les logs. Le même contenu est réessayé après au moins trente
-secondes lors d’un broadcast ; une nouvelle modification peut réessayer
-immédiatement. Cela évite les tentatives et logs à chaque rafraîchissement.
-Une erreur persistante du disque peut empêcher la survie au redémarrage ; elle
-n’empêche pas AgentsMon de fonctionner.
+A save error leaves the names in memory and writes an explicit
+warning to the logs. The same content is retried after at least thirty
+seconds during a broadcast; a new change can retry
+immediately. This avoids attempts and logs on every refresh.
+A persistent disk error can prevent names from surviving a restart; it
+does not prevent AgentsMon from working.
 
-La lecture et l’écriture sont limitées à 4 Mio. Un fichier absent signifie
-aucune personnalisation. Un JSON invalide, une version inconnue ou une erreur
-de lecture est journalisé sans recopier ses valeurs. Le fichier original reste
-intact pendant le démarrage et les rafraîchissements. Au premier nouveau
-renommage, il est déplacé vers `custom-names.json.recovery.<horodatage>` avant
-d’écrire les nouvelles préférences. Si ce déplacement échoue, l’écriture est
-abandonnée et sera réessayée ; l’original n’est pas écrasé.
+Reading and writing are limited to 4 MiB. A missing file means
+no customization. Invalid JSON, an unknown version or a read
+error is logged without copying its values. The original file stays
+intact during startup and refreshes. On the first new
+rename, it is moved to `custom-names.json.recovery.<timestamp>` before
+the new preferences are written. If this move fails, the write is
+abandoned and will be retried; the original is not overwritten.
 
-Pour examiner une personnalisation manquante, vérifier le fichier, l’identifiant
-de session complet et la clé de groupe. Pour récupérer une sauvegarde, arrêter
-AgentsMon, inspecter le fichier `.recovery.*`, restaurer uniquement les noms
-souhaités dans le schéma v1, puis relancer. Les anciens noms déjà perdus avant
-l’installation de ce correctif n’existaient pas sur disque et ne peuvent pas
-être restaurés depuis ce fichier.
+To examine a missing customization, check the file, the full session
+identifier and the group key. To recover a backup, stop
+AgentsMon, inspect the `.recovery.*` file, restore only the desired
+names in the v1 schema, then restart. Old names already lost before
+this fix was installed did not exist on disk and cannot
+be restored from this file.
 
-## Vérifications
+## Checks
 
-Tests automatisés :
+Automated tests:
 
 ```sh
 cargo test -p agentsmon-core
@@ -110,13 +110,13 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-Ils vérifient la restauration après un snapshot vide, l’isolation entre
-providers, la reformation des groupes, l’effacement des noms, un redémarrage
-simulé immédiatement après sauvegarde, les caractères Unicode/guillemets,
-les fichiers invalides ou futurs, leur conservation, la limite de taille et
-la reprise après un échec d’écriture.
+They check restoration after an empty snapshot, isolation between
+providers, group re-formation, clearing of names, a restart
+simulated immediately after a save, Unicode characters/quotes,
+invalid or future files, their preservation, the size limit and
+recovery after a write failure.
 
-Contrôle manuel : renommer une carte et un groupe, redémarrer AgentsMon, vérifier
-les libellés sur les panneaux et dans les résultats de LeSwitcheur ; fermer puis
-reprendre une session ; enfin vider les deux noms, redémarrer et vérifier que
-les personnalisations ne réapparaissent pas.
+Manual check: rename a card and a group, restart AgentsMon, check
+the labels on the panels and in the LeSwitcheur results; close then
+resume a session; finally clear both names, restart and check that
+the customizations do not reappear.
