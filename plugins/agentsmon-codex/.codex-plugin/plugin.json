@@ -4,10 +4,10 @@
   "description": "Publishes Codex session state and context metrics to the local AgentsMon app.",
   "author": {
     "name": "Olivier Guimbal",
-    "url": "https://github.com/oliv"
+    "url": "https://github.com/oguimbal"
   },
-  "homepage": "https://github.com/oliv/agentsmon",
-  "repository": "https://github.com/oliv/agentsmon",
+  "homepage": "https://github.com/oguimbal/agentsmon",
+  "repository": "https://github.com/oguimbal/agentsmon",
   "license": "BSD-3-Clause",
   "keywords": [
     "monitoring",
@@ -24,7 +24,7 @@
       "Lifecycle hooks",
       "Local metadata"
     ],
-    "websiteURL": "https://github.com/oliv/agentsmon",
+    "websiteURL": "https://github.com/oguimbal/agentsmon",
     "brandColor": "#34A853"
   }
 }

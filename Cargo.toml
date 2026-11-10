@@ -15,7 +15,7 @@ edition = "2021"
 rust-version = "1.89"
 authors = ["Olivier Guimbal"]
 license = "BSD-3-Clause"
-repository = "https://github.com/oliv/agentsmon"
+repository = "https://github.com/oguimbal/agentsmon"
 
 [workspace.dependencies]
 agentsmon-core = { path = "crates/agentsmon-core" }
