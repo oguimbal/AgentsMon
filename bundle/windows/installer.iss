@@ -15,7 +15,7 @@
 #define AppName       "AgentsMon"
 #define AppPublisher  "Olivier Guimbal"
 #define AppExeName    "agentsmon.exe"
-#define AppURL        "https://github.com/oguimbal/agentsmon"
+#define AppURL        "https://github.com/oguimbal/AgentsMon"
 
 #ifndef AppVersion
   #error AppVersion must be supplied: iscc /DAppVersion=X.Y.Z installer.iss
@@ -40,7 +40,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 ArchitecturesAllowed=x64compatible
 OutputDir=..\..\dist
 ; Stable filename (no version, no arch suffix) so the canonical download URL
-;   https://github.com/oguimbal/agentsmon/releases/latest/download/AgentsMon-setup.exe
+;   https://github.com/oguimbal/AgentsMon/releases/latest/download/AgentsMon-setup.exe
 ; works across releases. Mirrors the macOS .dmg artefact's naming.
 OutputBaseFilename=AgentsMon-setup
 UninstallDisplayIcon={app}\{#AppExeName}

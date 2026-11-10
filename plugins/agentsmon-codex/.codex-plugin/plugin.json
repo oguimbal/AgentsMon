@@ -6,8 +6,8 @@
     "name": "Olivier Guimbal",
     "url": "https://github.com/oguimbal"
   },
-  "homepage": "https://github.com/oguimbal/agentsmon",
-  "repository": "https://github.com/oguimbal/agentsmon",
+  "homepage": "https://github.com/oguimbal/AgentsMon",
+  "repository": "https://github.com/oguimbal/AgentsMon",
   "license": "BSD-3-Clause",
   "keywords": [
     "monitoring",
@@ -24,7 +24,7 @@
       "Lifecycle hooks",
       "Local metadata"
     ],
-    "websiteURL": "https://github.com/oguimbal/agentsmon",
+    "websiteURL": "https://github.com/oguimbal/AgentsMon",
     "brandColor": "#34A853"
   }
 }

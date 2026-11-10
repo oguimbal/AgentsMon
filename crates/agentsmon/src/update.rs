@@ -11,9 +11,9 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-const LATEST_RELEASE: &str = "https://api.github.com/repos/oguimbal/agentsmon/releases/latest";
+const LATEST_RELEASE: &str = "https://api.github.com/repos/oguimbal/AgentsMon/releases/latest";
 /// Assets are only downloaded from the repository's own releases.
-const DOWNLOAD_PREFIX: &str = "https://github.com/oguimbal/agentsmon/releases/download/";
+const DOWNLOAD_PREFIX: &str = "https://github.com/oguimbal/AgentsMon/releases/download/";
 pub const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// The release asset for this platform. File names carry no version, so
@@ -246,7 +246,7 @@ mod tests {
         assert_eq!(found.version, semver::Version::new(0, 1, 10));
         assert_eq!(
             found.url,
-            "https://github.com/oguimbal/agentsmon/releases/download/v0.1.10/AgentsMon.dmg"
+            "https://github.com/oguimbal/AgentsMon/releases/download/v0.1.10/AgentsMon.dmg"
         );
     }
 

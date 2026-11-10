@@ -34,10 +34,10 @@ Names entered through **Rename** are saved immediately in `custom-names.json` un
 
 ## Download
 
-Signed builds are attached to the [latest release](https://github.com/oguimbal/agentsmon/releases/latest):
+Signed builds are attached to the [latest release](https://github.com/oguimbal/AgentsMon/releases/latest):
 
-- macOS (Apple Silicon, macOS 13+): [`AgentsMon.dmg`](https://github.com/oguimbal/agentsmon/releases/latest/download/AgentsMon.dmg), notarised;
-- Windows 10+ (x64): [`AgentsMon-setup.exe`](https://github.com/oguimbal/agentsmon/releases/latest/download/AgentsMon-setup.exe), per-user installer, or the portable `.zip` of the release.
+- macOS (Apple Silicon, macOS 13+): [`AgentsMon.dmg`](https://github.com/oguimbal/AgentsMon/releases/latest/download/AgentsMon.dmg), notarised;
+- Windows 10+ (x64): [`AgentsMon-setup.exe`](https://github.com/oguimbal/AgentsMon/releases/latest/download/AgentsMon-setup.exe), per-user installer, or the portable `.zip` of the release.
 
 ## Updates
 
