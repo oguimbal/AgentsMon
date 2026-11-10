@@ -36,6 +36,14 @@ claude plugin validate .
 - `AppId` in `bundle/windows/installer.iss` never changes. The installer file list follows `scripts/build-windows.ps1`.
 - To try the release signature locally without replacing a running `dist/AgentsMon.app`: `AGENTSMON_DIST=<dir> CODESIGN_IDENTITY="<identity>" ./bundle/bundle.sh`. Notarisation is not part of local builds.
 
+## Updates
+
+- `crates/agentsmon/src/update.rs` reads `releases/latest` from the GitHub API at launch and every 24 hours. An update is announced only when the release is newer, is neither a draft nor a pre-release, and already has this platform's asset: the macOS and Windows jobs publish separately.
+- There is no update server and no signed manifest. Downloads are accepted from this repository's release URLs only. On Windows the setup runs only if `authenticode::signed_by_oganbo` accepts it; on macOS the DMG is opened in Finder and Gatekeeper checks its notarisation.
+- The arrow state (`UpdateBadge`) is application state: it goes through `broadcast` to every panel and is part of `bar_width`.
+- On macOS, replacing the running bundle with a newer version makes AgentsMon restart from it; this only applies when it runs from a `.app`.
+- The update check is a network request: keep the README's list of network requests accurate when it changes.
+
 ## Local source IPC
 
 - `crates/local-source-ipc` is vendored identically in LeSwitcheur and defines the versioned contract, socket transport and golden v1 fixture; see its README. Neither repository requires a sibling checkout to build.
@@ -53,6 +61,7 @@ claude plugin validate .
 - Screen hotplug and resolution changes reconcile panels without duplicates.
 - Dragging on one panel changes all panels; clicking the × never focuses the session.
 - Rename a session and a group, restart AgentsMon, and check both names. Close/reopen the project, then clear each name and restart again: the cleared names must not return. See `docs/custom-names.md` for storage and recovery.
+- With a release newer than the running version, the update arrow appears at the right of every bar without clipping the last card; a click downloads, then opens the DMG (macOS) or runs the signed installer (Windows).
 - Context values 0, 1, 50, 99, 100 and unavailable render correctly.
 - Claude states transition through idle, active, waiting and compacting.
 - Plugin installation is automatic and idempotent; uninstall preserves settings edited after installation.

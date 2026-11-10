@@ -95,6 +95,21 @@ pub enum MonitorEvent {
     ProvidersMenu {
         anchor_x: f32,
     },
+    /// Click on the update arrow: download and install the announced version.
+    InstallUpdate,
+}
+
+/// The update arrow at the right end of every bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UpdateBadge {
+    /// No newer version known.
+    #[default]
+    Hidden,
+    /// A newer version is published; a click downloads it.
+    Available,
+    Downloading,
+    /// Downloaded and handed to the system installer.
+    Ready,
 }
 
 /// How a `MonitorView` lays its cards out.
@@ -111,6 +126,7 @@ pub struct MonitorView {
     providers: Vec<ProviderStatus>,
     unread: HashSet<AgentId>,
     layout: Layout,
+    update: UpdateBadge,
     bar_drag_last_x: Option<gpui::Pixels>,
 }
 
@@ -130,8 +146,45 @@ impl MonitorView {
             providers,
             unread,
             layout,
+            update: UpdateBadge::Hidden,
             bar_drag_last_x: None,
         }
+    }
+
+    pub fn set_update(&mut self, update: UpdateBadge, cx: &mut Context<Self>) {
+        if self.update != update {
+            self.update = update;
+            cx.notify();
+        }
+    }
+
+    fn render_update(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (glyph, color) = match self.update {
+            UpdateBadge::Hidden | UpdateBadge::Available => ("↓", 0x58a6ff),
+            UpdateBadge::Downloading => ("…", 0x92949d),
+            UpdateBadge::Ready => ("✓", 0x3fb950),
+        };
+        let available = self.update == UpdateBadge::Available;
+        div()
+            .id("update")
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(UPDATE_BADGE_SIZE))
+            .rounded_full()
+            .text_size(px(11.0))
+            .text_color(rgb(color))
+            .on_mouse_move(|_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .when(available, |badge| {
+                badge
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(0x303138)))
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        cx.emit(MonitorEvent::InstallUpdate);
+                    }))
+            })
+            .child(glyph)
     }
 
     pub fn set_data(
@@ -469,7 +522,7 @@ impl MonitorView {
                 root.child(div().w(px(1.0)).h(px(13.0)).bg(rgb(0x3b3d44)))
             });
 
-        if self.slots.is_empty() {
+        let root = if self.slots.is_empty() {
             root.child(
                 div()
                     .flex()
@@ -510,7 +563,10 @@ impl MonitorView {
                         },
                     )),
             )
-        }
+        };
+        root.when(self.update != UpdateBadge::Hidden, |root| {
+            root.child(self.render_update(cx))
+        })
     }
 
     fn render_menu(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1515,6 +1571,23 @@ impl Render for DragPreview {
     }
 }
 
+const UPDATE_BADGE_SIZE: f32 = 17.0;
+
+/// Width of a bar: its cards, plus the update arrow and the gap before it.
+pub fn bar_width(
+    slots: &[Slot],
+    providers: &[ProviderStatus],
+    update: UpdateBadge,
+    max_width: f32,
+) -> f32 {
+    let arrow = if update == UpdateBadge::Hidden {
+        0.0
+    } else {
+        UPDATE_BADGE_SIZE + 3.0
+    };
+    (natural_width(slots, providers, max_width) + arrow).min(max_width.max(76.0))
+}
+
 pub fn natural_width(slots: &[Slot], providers: &[ProviderStatus], max_width: f32) -> f32 {
     // Root padding + the trailing drop target, then one gap per card (including
     // the gap before that target). Keeping these outside the per-card estimate
@@ -1801,6 +1874,9 @@ mod tests {
     #[test]
     fn empty_and_overflow_widths_are_bounded() {
         assert_eq!(natural_width(&[], &[], 900.0), 76.0);
+        assert_eq!(bar_width(&[], &[], UpdateBadge::Hidden, 900.0), 76.0);
+        assert_eq!(bar_width(&[], &[], UpdateBadge::Available, 900.0), 96.0);
+        assert_eq!(bar_width(&[], &[], UpdateBadge::Available, 80.0), 80.0);
         let mut snapshot = AgentSnapshot {
             id: AgentId::new("claude", "s"),
             pid: 1,

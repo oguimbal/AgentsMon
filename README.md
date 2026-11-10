@@ -38,6 +38,15 @@ Signed builds are attached to the [latest release](https://github.com/oguimbal/a
 - macOS (Apple Silicon, macOS 13+): [`AgentsMon.dmg`](https://github.com/oguimbal/agentsmon/releases/latest/download/AgentsMon.dmg), notarised;
 - Windows 10+ (x64): [`AgentsMon-setup.exe`](https://github.com/oguimbal/agentsmon/releases/latest/download/AgentsMon-setup.exe), per-user installer, or the portable `.zip` of the release.
 
+## Updates
+
+AgentsMon asks GitHub for the latest release of this repository at launch, then once a day. When a newer version is published for your platform, an arrow (↓) appears at the right end of every bar. Clicking it downloads the release file to your Downloads folder:
+
+- macOS: the DMG opens in Finder; drag AgentsMon over the installed application. AgentsMon notices the replaced bundle within a minute and restarts on the new version.
+- Windows: the installer runs silently, only if it carries the release signature, then starts the new version.
+
+A failed download brings the arrow back. There is no setting to disable the check.
+
 ## Build
 
 Use the stable Rust toolchain. GPUI's current dependencies require a recent stable compiler.
@@ -147,4 +156,5 @@ AgentsMon does not parse message content. It reads `.cstatus` metadata, lifecycl
 Network requests are limited to:
 
 - the Claude usage request described in [Account usage](#account-usage) (macOS, when a Claude Code credential exists);
-- the WebSocket to an OpenClaw Gateway you paired yourself.
+- the WebSocket to an OpenClaw Gateway you paired yourself;
+- the update check described in [Updates](#updates): one request to `api.github.com` per day, carrying the AgentsMon version in its `User-Agent`, and the download from `github.com` when you click the arrow.

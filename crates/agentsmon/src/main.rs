@@ -9,10 +9,10 @@ use agentsmon_providers::{
     AgentProvider, ClaudeProvider, CodexProvider, OpenClawProvider, ProviderWatcher, VibeProvider,
 };
 use agentsmon_ui::{
-    action_menu_height, agent_details_height, menu_size, natural_width, provider_details_height,
+    action_menu_height, agent_details_height, bar_width, menu_size, provider_details_height,
     rename_height, rename_key_bindings, ActionMenuEvent, ActionMenuView, AgentDetailsView, Layout,
     MenuAction, MonitorEvent, MonitorView, ProviderDetailsView, RenameEvent, RenameKey,
-    RenameTarget, RenameView,
+    RenameTarget, RenameView, UpdateBadge,
 };
 use gpui::{
     actions, point, px, size, AnyWindowHandle, App, AppContext, AsyncApp, Bounds, DisplayId,
@@ -43,12 +43,15 @@ const WATCHED_POLL_INTERVAL: Duration = Duration::from_secs(10);
 const FALLBACK_POLL_INTERVAL: Duration = Duration::from_secs(3);
 const CHANGE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
+#[cfg(target_os = "windows")]
+mod authenticode;
 mod connection_diagnostics;
 mod custom_names;
 mod git_worktree;
 mod hidden_sessions;
 mod local_source;
 mod notification;
+mod update;
 
 struct Panel {
     display_id: DisplayId,
@@ -100,6 +103,9 @@ struct AppStateInner {
     /// Last hidden-session list written to disk, to skip redundant writes.
     persisted_hidden: RefCell<Vec<agentsmon_core::HiddenSession>>,
     custom_names: RefCell<custom_names::Persistence>,
+    /// Newer release found by the update check, and what the bars show for it.
+    update: RefCell<Option<update::Update>>,
+    update_badge: std::cell::Cell<UpdateBadge>,
 }
 
 fn main() {
@@ -156,6 +162,8 @@ fn main() {
             connection_window: RefCell::new(None),
             persisted_hidden: RefCell::new(persisted_hidden),
             custom_names: RefCell::new(custom_names),
+            update: RefCell::new(None),
+            update_badge: std::cell::Cell::new(UpdateBadge::Hidden),
         }));
 
         cx.on_action(|_: &Quit, cx| cx.quit());
@@ -180,6 +188,7 @@ fn main() {
         refresh(&state, cx);
         reconcile_displays(cx, &state, true);
         ensure_integrations(cx);
+        spawn_update_checker(cx, state.clone());
         spawn_refresh_loop(cx, state, poll_interval);
     });
 }
@@ -354,6 +363,90 @@ fn refresh(state: &AppState, cx: &mut App) {
     broadcast(state, cx);
 }
 
+fn set_update_badge(state: &AppState, badge: UpdateBadge, cx: &mut App) {
+    if state.0.update_badge.replace(badge) != badge {
+        broadcast(state, cx);
+    }
+}
+
+/// Look for a newer release at launch, then once a day. The arrow appears on
+/// every bar when one is found. On macOS, also notice an update dragged over
+/// the running application and start it.
+fn spawn_update_checker(cx: &mut App, state: AppState) {
+    #[cfg(target_os = "macos")]
+    if let Some(bundle) = update::running_bundle() {
+        cx.spawn(async move |cx: &mut AsyncApp| loop {
+            cx.background_executor()
+                .timer(Duration::from_secs(60))
+                .await;
+            let watched = bundle.clone();
+            let updated = cx
+                .background_executor()
+                .spawn(async move { update::bundle_was_updated(&watched) })
+                .await;
+            if updated {
+                tracing::info!("the application bundle was updated; relaunching");
+                update::relaunch_after_exit(&bundle);
+                cx.update(|cx| cx.quit());
+                break;
+            }
+        })
+        .detach();
+    }
+
+    cx.spawn(async move |cx: &mut AsyncApp| loop {
+        let found = cx
+            .background_executor()
+            .spawn(async { update::check() })
+            .await;
+        if let Some(found) = found {
+            cx.update(|cx| {
+                tracing::info!(version = %found.version, "update available");
+                *state.0.update.borrow_mut() = Some(found);
+                // A download in progress keeps its badge.
+                if state.0.update_badge.get() == UpdateBadge::Hidden {
+                    set_update_badge(&state, UpdateBadge::Available, cx);
+                }
+            });
+        }
+        cx.background_executor().timer(update::CHECK_INTERVAL).await;
+    })
+    .detach();
+}
+
+/// Click on the update arrow: download the release file, then hand it to the
+/// system. A failure brings the arrow back so the click can be repeated.
+fn install_update(state: &AppState, cx: &mut App) {
+    if state.0.update_badge.get() != UpdateBadge::Available {
+        return;
+    }
+    let Some(found) = state.0.update.borrow().clone() else {
+        return;
+    };
+    set_update_badge(state, UpdateBadge::Downloading, cx);
+    let state = state.clone();
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        let applied = cx
+            .background_executor()
+            .spawn(async move { update::download(&found).is_some_and(|path| update::apply(&path)) })
+            .await;
+        cx.update(|cx| {
+            let badge = if applied {
+                UpdateBadge::Ready
+            } else {
+                UpdateBadge::Available
+            };
+            set_update_badge(&state, badge, cx);
+        });
+        // The Windows installer closes this process and starts the new one.
+        if applied && cfg!(target_os = "windows") {
+            cx.background_executor().timer(Duration::from_secs(2)).await;
+            cx.update(|cx| cx.quit());
+        }
+    })
+    .detach();
+}
+
 fn spawn_refresh_loop(cx: &mut App, state: AppState, poll_interval: Duration) {
     let mut last_refresh = Instant::now();
     let mut refresh_pending = false;
@@ -502,11 +595,13 @@ fn broadcast(state: &AppState, cx: &mut App) {
         provider.sessions_hidden = state.0.store.borrow().is_provider_hidden(&provider.id);
     }
     let unread = state.0.unread.borrow().clone();
+    let update = state.0.update_badge.get();
     for panel in state.0.panels.borrow().iter() {
         panel.view.update(cx, |view, cx| {
-            view.set_data(slots.clone(), providers.clone(), unread.clone(), cx)
+            view.set_data(slots.clone(), providers.clone(), unread.clone(), cx);
+            view.set_update(update, cx);
         });
-        let width = natural_width(&slots, &providers, panel.max_width);
+        let width = bar_width(&slots, &providers, update, panel.max_width);
         let _ = cx.update_window(panel.handle, |_, window, _| {
             window.resize(size(px(width), px(BAR_HEIGHT)));
         });
@@ -558,7 +653,12 @@ fn maximum_x_offset(state: &AppState, slots: &[Slot]) -> f32 {
         .iter()
         .map(|panel| {
             panel.display_bounds.size.width.as_f32()
-                - natural_width(slots, &providers, panel.max_width)
+                - bar_width(
+                    slots,
+                    &providers,
+                    state.0.update_badge.get(),
+                    panel.max_width,
+                )
         })
         .fold(f32::INFINITY, f32::min)
         .max(0.0)
@@ -652,6 +752,7 @@ fn handle_event(
             let actions = openclaw_integration::menu_actions(&state.0.openclaw);
             open_actions_menu(state, display_id, display_bounds, *anchor_x, actions, cx);
         }
+        MonitorEvent::InstallUpdate => install_update(state, cx),
     }
 }
 
@@ -701,6 +802,7 @@ fn handle_menu_event(event: &MonitorEvent, state: &AppState, cx: &mut App) {
         | MonitorEvent::ShowGroup { .. }
         | MonitorEvent::ProvidersMenu { .. }
         | MonitorEvent::ToggleProvider(_)
+        | MonitorEvent::InstallUpdate
         | MonitorEvent::LeaveGroup => {}
     }
 }
@@ -1215,7 +1317,8 @@ fn reconcile_displays(cx: &mut App, state: &AppState, force: bool) {
     for display in displays {
         let bounds = panel_area(display.as_ref());
         let max_width = (bounds.size.width.as_f32() - SCREEN_INSET * 2.0).max(76.0);
-        let width = natural_width(&slots, &providers, max_width);
+        let update = state.0.update_badge.get();
+        let width = bar_width(&slots, &providers, update, max_width);
         let x_offset = (*state.0.x_offset.borrow()).clamp(0.0, (max_width - width).max(0.0));
         let window_bounds = Bounds {
             origin: point(
@@ -1255,6 +1358,7 @@ fn reconcile_displays(cx: &mut App, state: &AppState, force: bool) {
                     .borrow()
                     .clone()
                     .expect("window builder sets view");
+                view.update(cx, |view, cx| view.set_update(update, cx));
                 let event_state = state.clone();
                 let event_display_id = display.id();
                 let event_display_bounds = bounds;
