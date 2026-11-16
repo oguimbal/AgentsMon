@@ -40,14 +40,19 @@ struct StatusRecord {
     /// The last lifecycle hook came from a subagent (it carried an agent_id).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     subagent: bool,
-    /// Opaque ids of bounded Monitor tool watches the main agent armed and
-    /// that were still running at the last Stop.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    monitor_task_ids: Vec<String>,
+    /// Opaque ids of the background tasks the main agent waits for (bounded
+    /// Monitor watches, foreground commands moved to the background) that
+    /// were still running at the last Stop.
+    #[serde(
+        default,
+        alias = "monitor_task_ids",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    awaited_task_ids: Vec<String>,
 }
 
-/// Monitor ids kept per record; older ones are dropped first.
-const MAX_MONITORS: usize = 16;
+/// Awaited task ids kept per record; older ones are dropped first.
+const MAX_AWAITED: usize = 16;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClaudeRateLimits {
@@ -78,15 +83,15 @@ pub struct RecordUpdate<'a> {
     /// The hook carries an agent_id. Subagent activity cannot wake a session
     /// whose main turn has ended or waits for the user.
     pub subagent: bool,
-    /// PostToolUse of the Monitor tool: id of the bounded watch it armed.
-    pub started_monitor: Option<String>,
+    /// PostToolUse: id of a background task the main agent waits for.
+    pub started_wait: Option<String>,
     /// Stop hook: what the ended turn left armed.
     pub stop_tasks: Option<StopTasks>,
 }
 
 /// Background work listed by Stop. Claude Code labels Monitor watches
 /// `shell` like any background Bash (dev server…), so a resting turn only
-/// awaits when a task id matches a monitor recorded at its PostToolUse.
+/// awaits when a task id matches one recorded at its PostToolUse.
 pub struct StopTasks {
     pub running: Vec<String>,
     /// A one-shot session cron (ScheduleWakeup…) will resume the session.
@@ -121,36 +126,41 @@ pub fn merge_record(path: &Path, mut update: RecordUpdate<'_>) -> Result<()> {
     let resting = previous.as_ref().is_some_and(|r| {
         r.state == "idle" || r.state == "awaiting" || (r.state == "waiting" && !r.subagent)
     });
-    let awaiting = previous.as_ref().is_some_and(|r| r.state == "awaiting");
-    // Claude's idle reminder, a minute after the turn ended, does not end
-    // the wait for a monitor or a scheduled wakeup.
+    let rested = previous
+        .as_ref()
+        .is_some_and(|r| r.state == "idle" || r.state == "awaiting");
+    // Claude's idle reminder, a minute after the session came to rest, does
+    // not end the wait for a task or a scheduled wakeup. On an idle record it
+    // must not look newer than the registry or than the user's shells
+    // either: a `!` command moved to the background a minute earlier is only
+    // known from those.
     let idle_reminder = update.event == "Notification" && update.state == "idle";
-    if (update.subagent && update.state == "active" && resting) || (awaiting && idle_reminder) {
+    if (update.subagent && update.state == "active" && resting) || (rested && idle_reminder) {
         // Merge like a heartbeat so a newer registry status still wins.
         update.state = "";
         update.event = "";
         update.activity.clear();
     }
-    let mut monitor_task_ids = previous
+    let mut awaited_task_ids = previous
         .as_ref()
-        .map(|r| r.monitor_task_ids.clone())
+        .map(|r| r.awaited_task_ids.clone())
         .unwrap_or_default();
-    if let Some(id) = update.started_monitor.take() {
-        if !monitor_task_ids.contains(&id) {
-            monitor_task_ids.push(id);
+    if let Some(id) = update.started_wait.take() {
+        if !awaited_task_ids.contains(&id) {
+            awaited_task_ids.push(id);
         }
-        let excess = monitor_task_ids.len().saturating_sub(MAX_MONITORS);
-        monitor_task_ids.drain(..excess);
+        let excess = awaited_task_ids.len().saturating_sub(MAX_AWAITED);
+        awaited_task_ids.drain(..excess);
     }
     if let Some(tasks) = update.stop_tasks.take() {
-        monitor_task_ids.retain(|id| tasks.running.contains(id));
+        awaited_task_ids.retain(|id| tasks.running.contains(id));
         if update.state == "idle" {
             if tasks.wakeup {
                 update.state = "awaiting";
                 update.activity = "wakeup".into();
-            } else if !monitor_task_ids.is_empty() {
+            } else if !awaited_task_ids.is_empty() {
                 update.state = "awaiting";
-                update.activity = "monitor".into();
+                update.activity = "task".into();
             }
         }
     }
@@ -236,7 +246,7 @@ pub fn merge_record(path: &Path, mut update: RecordUpdate<'_>) -> Result<()> {
         } else {
             update.subagent
         },
-        monitor_task_ids,
+        awaited_task_ids,
     };
 
     let temp = path.with_extension(format!("cstatus.tmp.{}", std::process::id()));
@@ -426,7 +436,7 @@ mod tests {
             rate_limits: None,
             title: None,
             subagent: false,
-            started_monitor: None,
+            started_wait: None,
             stop_tasks: None,
         }
     }
@@ -592,7 +602,7 @@ mod tests {
             &path,
             RecordUpdate {
                 event: "PostToolUse",
-                started_monitor: Some("bmonitor1".into()),
+                started_wait: Some("bmonitor1".into()),
                 ..update(None)
             },
         )
@@ -601,12 +611,12 @@ mod tests {
         // A dev server alone is not awaited, the monitor is.
         merge_record(&path, stop(&["bserver01"], false)).unwrap();
         assert_eq!(read().state, "idle");
-        assert!(read().monitor_task_ids.is_empty());
+        assert!(read().awaited_task_ids.is_empty());
         merge_record(
             &path,
             RecordUpdate {
                 event: "PostToolUse",
-                started_monitor: Some("bmonitor2".into()),
+                started_wait: Some("bmonitor2".into()),
                 ..update(None)
             },
         )
@@ -615,9 +625,9 @@ mod tests {
         let after = read();
         assert_eq!(
             (after.state.as_str(), after.activity.as_str()),
-            ("awaiting", "monitor")
+            ("awaiting", "task")
         );
-        assert_eq!(after.monitor_task_ids, ["bmonitor2"]);
+        assert_eq!(after.awaited_task_ids, ["bmonitor2"]);
 
         // Claude's idle reminder and internal subagents keep the wait.
         merge_record(
@@ -655,6 +665,75 @@ mod tests {
             (after.state.as_str(), after.activity.as_str()),
             ("awaiting", "wakeup")
         );
+    }
+
+    #[test]
+    fn the_idle_reminder_does_not_postdate_a_rest() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.cstatus");
+        let read = || serde_json::from_slice::<StatusRecord>(&fs::read(&path).unwrap()).unwrap();
+        merge_record(
+            &path,
+            RecordUpdate {
+                state: "idle",
+                event: "Stop",
+                activity: String::new(),
+                ..update(None)
+            },
+        )
+        .unwrap();
+        let mut stopped = read();
+        stopped.event_timestamp = Some("2026-11-16T08:06:15Z".into());
+        fs::write(&path, serde_json::to_vec(&stopped).unwrap()).unwrap();
+
+        // Claude's idle reminder a minute later, then an internal subagent.
+        merge_record(
+            &path,
+            RecordUpdate {
+                state: "idle",
+                event: "Notification",
+                activity: String::new(),
+                ..update(None)
+            },
+        )
+        .unwrap();
+        merge_record(
+            &path,
+            RecordUpdate {
+                event: "SubagentStop",
+                subagent: true,
+                ..update(None)
+            },
+        )
+        .unwrap();
+        let after = read();
+        assert_eq!(after.event, "Stop");
+        assert_eq!(after.event_timestamp, stopped.event_timestamp);
+
+        // The reminder still ends a turn left active (interrupted).
+        merge_record(&path, update(None)).unwrap();
+        merge_record(
+            &path,
+            RecordUpdate {
+                state: "idle",
+                event: "Notification",
+                activity: String::new(),
+                ..update(None)
+            },
+        )
+        .unwrap();
+        let after = read();
+        assert_eq!(
+            (after.state.as_str(), after.event.as_str()),
+            ("idle", "Notification")
+        );
+
+        // Records written under the former field name still load their ids.
+        let old: StatusRecord = serde_json::from_str(
+            r#"{"session_id":"s","pid":1,"ppid":1,"state":"awaiting","activity":"monitor","timestamp":"t","cwd":"","event":"Stop","monitor_task_ids":["b1"]}"#,
+        )
+        .unwrap();
+        assert_eq!(old.awaited_task_ids, ["b1"]);
     }
 
     #[test]

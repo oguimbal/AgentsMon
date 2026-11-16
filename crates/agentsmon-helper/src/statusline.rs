@@ -89,7 +89,7 @@ pub fn proxy(input: &[u8]) -> Result<()> {
                 rate_limits: rate_limits.clone(),
                 title: None,
                 subagent: false,
-                started_monitor: None,
+                started_wait: None,
                 stop_tasks: None,
             },
         )?;

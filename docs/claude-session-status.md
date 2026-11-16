@@ -73,7 +73,7 @@ connect to the inter-agent messaging socket.
 | `status` | AgentsMon state |
 | --- | --- |
 | `busy` | Active, green; keeps Compacting if the current hook indicates it |
-| `shell` | Idle, grey: turn finished, shell started in the background still alive; Awaiting if the last hook is waiting for a monitor (see below) |
+| `shell` | Idle, grey: turn finished, shell started in the background still alive; Awaiting if the last hook waits for a task, or if one of the shells was started after the last hook (`!` typed by the user, see below) |
 | `waiting` | Waiting, orange |
 | `idle` | Idle, grey |
 | unknown value | Fallback to hooks, diagnostic after persistence |
@@ -108,22 +108,24 @@ including those of the Monitor tool (the internal `kind: "monitor"` is not
 exported). Only MCP/WebSocket monitors come out as `monitor`. The registry
 publishes `shell` as soon as a `local_bash` is alive, monitors included. A dev server and a
 Monitor are therefore indistinguishable by their type, and a `Bash` started with
-`run_in_background` notifies the agent when it ends exactly like a dev server:
+`run_in_background: true` notifies the agent when it ends exactly like a dev server:
 waiting for a build started this way is **not detectable** without reading the
-conversation, and stays grey.
+conversation, and stays grey. Commands the model ran in the foreground and
+`!` commands are detectable: see "Shells the session waits for" below.
 
 Rule applied by the helper:
 
 1. `PostToolUse` of the `Monitor` tool without `agent_id`: second read of the hook
    limited to `tool_response.taskId` and `persistent`. A non-persistent monitor
-   adds its (opaque) id to the record's `monitor_task_ids` (16 at most).
+   adds its (opaque) id to the record's `awaited_task_ids` (16 at most;
+   `monitor_task_ids` in records written before 16 November 2026).
    Persistent monitors (endless log watching) are ignored.
 2. `Stop`: only the `id` of tasks and the `recurring` of crons are decoded.
    Monitor ids absent from `background_tasks` are forgotten. If the turn
    was going to become Idle and a one-shot cron (`recurring: false`:
    `ScheduleWakeup`, single `CronCreate` reminder) exists, the state is
-   `awaiting` / activity `wakeup`; otherwise, if a retained monitor is still running,
-   `awaiting` / `monitor`. Recurring crons (`/loop 5m`…) stay grey.
+   `awaiting` / activity `wakeup`; otherwise, if a retained task is still running,
+   `awaiting` / `task`. Recurring crons (`/loop 5m`…) stay grey.
 3. The `idle_prompt` reminder and subagent hooks are merged as
    heartbeats on an Awaiting record.
 
@@ -145,6 +147,107 @@ Limits: a single `CronCreate` reminder far in the future (tomorrow at 15:00) lea
 Awaiting until then; a cron deleted from the interface, without a tool or a hook,
 leaves it Awaiting until the next prompt. A WebSocket/MCP monitor is not a `local_bash`, so the registry
 then publishes `idle` and the card goes back to grey.
+
+## Shells the session waits for
+
+Added on 16 November 2026 (CLI 2.1.325). Two kinds of background shell resume
+the model when they end and are displayed as Awaiting. Both were measured on a
+throwaway interactive session, with a temporary hook logging field names only
+and a sampler of the registry's `status` / `statusUpdatedAt`.
+
+**Foreground command moved to the background.** A `Bash` call without
+`run_in_background` that outlives its `timeout` is not killed: it becomes a
+background task and the model is notified when it ends. Measured `PostToolUse`
+response: `{"backgroundTaskId":"bpjgjdz6e","timedOutAfterMs":4000, …}`, then
+`Stop` → `background_tasks: [{"id":"bpjgjdz6e","type":"shell","status":"running"}]`.
+The helper reads `backgroundTaskId`, the presence of `timedOutAfterMs`,
+`backgroundedByUser` (Ctrl+B) and `backgroundedToDeliverMessage` (the two
+flags come from the binary's schema and were not exercised), and treats the
+id like a monitor's. A command started with `run_in_background: true` carries
+none of them and stays grey. `sleep` is not moved: `! sleep 200` was killed at
+the timeout.
+
+**`!` command typed by the user.** It calls the Bash tool directly: no hook at
+all, at the start or when it is moved to the background. Measured sequences
+(the second set with a shell of the model, `sleep 900` started with
+`run_in_background`, already running):
+
+| Moment | Registry | Hook |
+| --- | --- | --- |
+| `!` submitted | `busy` | none |
+| Bash timeout (120 s by default) or Ctrl+B | `shell` | none |
+| 60 s later | unchanged | `Notification` `idle_prompt` |
+| command ends | `busy` (after a few ms of `idle` when no other shell runs) | `UserPromptSubmit` (the model answers), then `Stop` |
+
+| `!` command, another shell running | Registry | Hook |
+| --- | --- | --- |
+| ends in the foreground (`! true`, 30 s) | `busy`, then `shell` | `Stop` about 3 s before `shell` (the model answers; no `UserPromptSubmit`) |
+| cancelled with Esc after 6 s | `busy`, then `shell` | none |
+| moved to the background at 120 s | `busy`, then `shell` | none |
+
+The registry does not say whose shell it is, and the last two rows are
+identical there. What differs is the process: a command moved to the
+background is still a shell child of the Claude process, started after the
+last hook; a cancelled one is gone; a shell of the model started during a
+turn, so before the `Stop` that ended it. Claude runs each Bash command
+through the user's shell (`zsh`, `bash` or `sh`), which stays the direct child
+for the whole command.
+
+Rule, on the provider side only (`claude_runtime::Registry::read`,
+`process::shell_child_started`): for a `shell` registry newer than an Idle
+hook, the session is Awaiting if the Claude process has a live direct child
+named `zsh`, `bash` or `sh` whose start time is after the hook's and not after
+the registry's `statusUpdatedAt`. Only the name, the parent and the start
+time are read, never a command line. Listing the processes took 4 ms for
+1,200 of them on the development Mac, so it happens at most once per scan,
+and a negative answer is kept per PID until the hook time or the registry
+time changes: the shell exists when `shell` is published or never, and a
+session with a dev server is not listed again at every scan. Start times are whole seconds: a
+`!` submitted within the second of the last hook stays grey.
+
+The upper bound keeps out children started once the session rests. Hooks are
+direct children of the Claude process too, and some are shell scripts (a
+`bash` one lived 0.3 s at `Stop` in the measurements).
+
+The `idle_prompt` reminder is merged as a heartbeat on an Idle record as well
+(it was already on an Awaiting one); otherwise its time would be later than
+the shell's start and bring the card back to grey after a minute.
+
+In these measurements the registry published its resting status about 3 s
+after AgentsMon's own `Stop` hook, at the moment the slowest `Stop` hook (a
+sound played for 2.8 s) returned.
+
+Verified on 16 November 2026 with the deployed application, reading the state
+from the local source socket next to the registry (the v1 protocol exports
+Awaiting as `active`). Awaiting, with one notification, after the model's
+answer only: a `!` command of 200 s alone (unchanged by the reminder at
++60 s), one of 170 s beside a `run_in_background` shell, and a foreground
+command of the model outliving a 4 s timeout (record `awaiting` / `task`).
+Grey beside that shell: the shell alone for 185 s, `! true`, and a `!`
+command cancelled with Esc.
+
+Limits:
+
+- `! npm run dev` cannot be told from `! cargo build`: a server started with
+  `!` stays Awaiting. Same for a server the model runs in the foreground until
+  the timeout, or that the user moves with Ctrl+B.
+- After a `!` command went to the background, a new prompt ends the wait for
+  good: the `Stop` of that turn is later than the shell's start.
+- A `!` typed after a turn interrupted with Esc stays grey: the last hook is
+  still Active, and the `idle_prompt` reminder that ends it comes after the
+  shell's start. Once that reminder has passed (60 s at rest), `!` commands
+  are recognised again.
+- A shell that a background subagent starts with `run_in_background` after
+  the main turn ended is taken for the user's (subagent hooks do not move the
+  hook time of a resting record). Not exercised.
+- A hook written as a shell script that starts in a later second than
+  AgentsMon's `Stop` hook and is still running when the registry publishes
+  `shell` reads as Awaiting until it exits.
+- Only the `Bash` tool is matched in `PostToolUse`, not the Windows
+  PowerShell tool; the shell names above are the Unix ones (`.exe` accepted).
+- Nothing is kept in memory: AgentsMon restarted during the wait still shows
+  Awaiting. With a helper older than this change, the `idle_prompt` reminder
+  ends the wait after a minute.
 
 ## Event order and safeguards
 
@@ -199,8 +302,8 @@ when `SubagentStop` arrived, because the `Stop` hook had written `active`
 - `Stop` stays Active only if `background_tasks` contains agent
   work (`subagent`, `workflow`, `teammate`, `cloud session`). `shell`,
   `monitor`, `MCP task`, `dream` or `auto-mode scan` tasks alone give Idle
-  (or Awaiting for a monitor or a wakeup, see the dedicated section). Only
-  the `type` field of each task is decoded; `command` and `description`
+  (or Awaiting for an awaited task or a wakeup, see the dedicated sections). Only
+  the `id` and `type` fields of each task are decoded; `command` and `description`
   contain text and are not read.
 - On the provider side, when the last hook is `SubagentStart`/`SubagentStop`, an
   `idle`/`shell` registry applies even if it is older than this hook. A
@@ -220,7 +323,8 @@ later, and the card went back to green. The safeguard therefore also covers wait
 `Notification` hook: only `permission_prompt`, `worker_permission_prompt`,
 `elicitation_dialog`, `elicitation_url_dialog` and `agent_needs_input` (or a
 notification without a type, old versions) give Waiting. `idle_prompt`,
-sent one minute after a finished turn left unanswered, gives Idle;
+sent one minute after a finished turn left unanswered, gives Idle on a record
+still Active and is merged as a heartbeat on an Idle or Awaiting one;
 records written before 1 October 2026 with this type are also read as Idle.
 `auth_success` stays Active. The other types (`agent_completed`,
 `push_notification`, `quota_auto_resume_*`, `computer_use_*`,
@@ -245,6 +349,10 @@ as for the other sources. No Claude behaviour is added to the UI.
 - Reads are small synchronous local reads, with no external
   command, network wait or internal polling loop. Like the `.cstatus` files,
   they nevertheless depend on the responsiveness of the local file system.
+- A session that comes to rest on a `shell` status makes one scan list the
+  system's processes (name, parent and start time; see "Shells the session
+  waits for"), and every scan does while a `!` command is awaited. Other
+  scans list none beyond the sessions' own process trees.
 - Partial JSON, access error, incompatible field, inconsistent timestamp: no
   panic, no old `idle` kept in cache, fallback to the last hook.
 - A missing file is not an incident: old versions, startup and

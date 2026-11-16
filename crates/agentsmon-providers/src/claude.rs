@@ -23,7 +23,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use sysinfo::{Pid, System};
 
-use crate::process::{find_host, refresh_process_trees};
+use crate::process::{all_processes, find_host, refresh_process_trees, shell_child_started};
 use crate::{claude_runtime, focus, AgentProvider, ProviderDiagnostic};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -235,6 +235,9 @@ impl AgentProvider for ClaudeProvider {
         refresh_process_trees(&mut system, &seed_pids);
         let mut snapshots = Vec::new();
         let mut runtime_issue = None;
+        // Listed at most once per scan, and only for a session resting on a
+        // shell.
+        let mut processes = None;
         for (record, mut last_activity) in records {
             if !is_claude_process(&system, record.pid, last_activity) {
                 continue;
@@ -259,6 +262,14 @@ impl AgentProvider for ClaudeProvider {
                     time: hook_time,
                     subagent: matches!(record.event.as_str(), "SubagentStart" | "SubagentStop"),
                     wakeup: record.activity == "wakeup",
+                },
+                |published| {
+                    shell_child_started(
+                        processes.get_or_insert_with(all_processes),
+                        record.pid,
+                        hook_time,
+                        published,
+                    )
                 },
                 SystemTime::now(),
             ) {

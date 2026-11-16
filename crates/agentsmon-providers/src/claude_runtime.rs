@@ -2,6 +2,7 @@
 //! See docs/claude-session-status.md before changing this reader. In particular,
 //! silence never means idle, and `updatedAt` is NOT a status timestamp.
 
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read};
 use std::path::PathBuf;
@@ -31,6 +32,11 @@ struct RuntimeRecord {
 pub(crate) struct Registry {
     pub root: PathBuf,
     health: Mutex<Health>,
+    /// Per PID, the last (hook time, `shell` time) for which the process held
+    /// no shell of the user. Such a shell exists when the status is
+    /// published or never: the answer holds until one of the two changes,
+    /// which spares listing the processes at every scan of a dev server.
+    no_user_shell: Mutex<HashMap<i32, (SystemTime, SystemTime)>>,
 }
 
 /// The session's latest Claude hook, as recorded by the helper.
@@ -42,7 +48,7 @@ pub struct LastHook {
     /// forked agent after the main turn ended.
     pub subagent: bool,
     /// Awaiting a one-shot session cron (ScheduleWakeup…) rather than a
-    /// monitor. Such a wait involves no process, so the registry says `idle`.
+    /// task. Such a wait involves no process, so the registry says `idle`.
     pub wakeup: bool,
 }
 
@@ -57,17 +63,23 @@ impl Registry {
         Self {
             root,
             health: Mutex::default(),
+            no_user_shell: Mutex::default(),
         }
     }
 
     /// Caller has already checked that this PID is a live Claude process.
     /// Only inspect that process's own record, never enumerate arbitrary files.
+    ///
+    /// `user_shell` is asked, for a session resting on a `shell` status
+    /// published at the given time, whether the Claude process holds a shell
+    /// started after the last hook and no later than that time.
     pub fn read(
         &self,
         pid: i32,
         session_id: &str,
         process_started: SystemTime,
         hook: LastHook,
+        user_shell: impl FnOnce(SystemTime) -> bool,
         now: SystemTime,
     ) -> Result<Option<(AgentState, SystemTime)>, ProviderDiagnostic> {
         let path = self.root.join(format!("{pid}.json"));
@@ -166,10 +178,20 @@ impl Registry {
             }
             return Err(diagnostic);
         };
+        let timestamp = millis(timestamp).ok_or_else(invalid)?;
+        // A `!` command typed by the user raises no hook. Moved to the
+        // background (at its timeout, or with Ctrl+B), it is a shell started
+        // after the last hook, and its end resumes the model. The model's own
+        // shells start during a turn, so before the hook that ended it.
+        let user_shell = status == "shell"
+            && hook.state == AgentState::Idle
+            && timestamp > hook.time
+            && self.user_shell(pid, (hook.time, timestamp), user_shell);
         let state = match status {
-            // A Monitor tool watch is a `local_bash` task: the registry says
-            // `shell` while the turn rests on it, `idle` once it has gone.
-            "shell" if hook.state == AgentState::Awaiting => AgentState::Awaiting,
+            // An awaited task (Monitor watch, command moved to the
+            // background) is a `local_bash` task: the registry says `shell`
+            // while the turn rests on it, `idle` once it has gone.
+            "shell" if hook.state == AgentState::Awaiting || user_shell => AgentState::Awaiting,
             "idle" if hook.state == AgentState::Awaiting && hook.wakeup => AgentState::Awaiting,
             // `shell`: the turn is over but a background `local_bash` task
             // (e.g. a dev server) still runs. The model is not working on it.
@@ -183,7 +205,6 @@ impl Registry {
                 ))
             }
         };
-        let timestamp = millis(timestamp).ok_or_else(invalid)?;
         if timestamp < started || timestamp > now + Duration::from_secs(2) {
             return Err(issue(
                 "claude.registry.timestamp",
@@ -204,6 +225,32 @@ impl Registry {
             state
         };
         Ok(Some((state, timestamp)))
+    }
+
+    fn user_shell(
+        &self,
+        pid: i32,
+        key: (SystemTime, SystemTime),
+        ask: impl FnOnce(SystemTime) -> bool,
+    ) -> bool {
+        let Ok(mut absent) = self.no_user_shell.lock() else {
+            return ask(key.1);
+        };
+        if absent.get(&pid) == Some(&key) {
+            return false;
+        }
+        let found = ask(key.1);
+        if found {
+            absent.remove(&pid);
+        } else {
+            // One entry per session resting on a shell; PIDs are not reused
+            // fast enough for this to matter.
+            if absent.len() >= 256 {
+                absent.clear();
+            }
+            absent.insert(pid, key);
+        }
+        found
     }
 
     pub fn finish_scan(&self, issue: Option<ProviderDiagnostic>) {

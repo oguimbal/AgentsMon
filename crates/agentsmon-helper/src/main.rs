@@ -51,26 +51,43 @@ struct SessionCron {
     recurring: bool,
 }
 
-/// `PostToolUse` of the Monitor tool, decoded in a second pass only for that
-/// tool: other tools' responses carry conversation content.
+/// `PostToolUse` of the Monitor and Bash tools, decoded in a second pass
+/// only for these two tools and these fields (task ids and flags): the rest
+/// of a tool response is conversation content.
 #[derive(Debug, Deserialize)]
-struct MonitorHook {
-    tool_response: MonitorResponse,
+struct WaitHook {
+    tool_response: WaitResponse,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct MonitorResponse {
+struct WaitResponse {
+    /// Monitor: id of the watch.
+    #[serde(default)]
     task_id: String,
     #[serde(default)]
     persistent: bool,
+    /// Bash: id of the command once it runs in the background.
+    #[serde(default)]
+    background_task_id: String,
+    /// Bash: the foreground command outlived its timeout and was moved to
+    /// the background. Only the field's presence is read.
+    #[serde(default)]
+    timed_out_after_ms: Option<serde::de::IgnoredAny>,
+    /// Bash: the user moved the running command to the background (Ctrl+B).
+    #[serde(default)]
+    backgrounded_by_user: bool,
+    /// Bash: moved to the background so that a queued message is delivered.
+    #[serde(default)]
+    backgrounded_to_deliver_message: bool,
 }
 
 impl BackgroundTask {
     /// Agent work that continues after the turn and resumes the session.
     /// Shells (dev servers…), MCP tasks and internal housekeeping (`dream`,
     /// `auto-mode scan`) run without the model waiting on them. Monitor tool
-    /// watches are recognised by id instead (see `record::StopTasks`).
+    /// watches and commands the model was waiting for are recognised by id
+    /// instead (see `record::StopTasks`).
     fn is_agent_work(&self) -> bool {
         matches!(
             self.kind.as_str(),
@@ -112,7 +129,7 @@ fn process_hook(input: &[u8]) -> Result<()> {
     }
 
     let (state, activity) = event_state(&hook);
-    let started_monitor = started_monitor(&hook, input);
+    let started_wait = started_wait(&hook, input);
     let stop_tasks = stop_tasks(&hook);
     // Informational hooks only refresh the record, like a status-line beat.
     let event = if state.is_empty() {
@@ -142,7 +159,7 @@ fn process_hook(input: &[u8]) -> Result<()> {
             // extraction...) after the main turn ended; their hooks carry an
             // agent_id and must not turn an idle or waiting session green.
             subagent: hook.agent_id.is_some(),
-            started_monitor,
+            started_wait,
             stop_tasks,
         },
     )
@@ -155,19 +172,35 @@ fn session_dir<'a>(project_dir: Option<&'a str>, cwd: &'a str) -> &'a str {
     project_dir.filter(|dir| !dir.is_empty()).unwrap_or(cwd)
 }
 
-/// Task id of a bounded watch armed by the main agent with the Monitor tool.
-/// Persistent monitors (log tails…) watch indefinitely without the agent
-/// waiting on an outcome; a subagent's monitor does not resume the session.
-fn started_monitor(hook: &HookInput, input: &[u8]) -> Option<String> {
-    if hook.hook_event_name != "PostToolUse"
-        || hook.tool_name.as_deref() != Some("Monitor")
-        || hook.agent_id.is_some()
-    {
+/// Id of a background task the main agent waits for: a bounded watch armed
+/// with the Monitor tool, or a Bash command it ran in the foreground that was
+/// moved to the background (timeout, Ctrl+B, queued message). Persistent
+/// monitors (log tails…) and commands started with `run_in_background` (dev
+/// servers…) run without the agent waiting on an outcome; a subagent's task
+/// does not resume the session.
+fn started_wait(hook: &HookInput, input: &[u8]) -> Option<String> {
+    if hook.hook_event_name != "PostToolUse" || hook.agent_id.is_some() {
         return None;
     }
-    let monitor: MonitorHook = serde_json::from_slice(input).ok()?;
-    (!monitor.tool_response.persistent && !monitor.tool_response.task_id.is_empty())
-        .then_some(monitor.tool_response.task_id)
+    let tool = hook.tool_name.as_deref()?;
+    if !matches!(tool, "Monitor" | "Bash") {
+        return None;
+    }
+    let response = serde_json::from_slice::<WaitHook>(input)
+        .ok()?
+        .tool_response;
+    let id = match tool {
+        "Monitor" if !response.persistent => response.task_id,
+        "Bash"
+            if response.timed_out_after_ms.is_some()
+                || response.backgrounded_by_user
+                || response.backgrounded_to_deliver_message =>
+        {
+            response.background_task_id
+        }
+        _ => return None,
+    };
+    (!id.is_empty()).then_some(id)
 }
 
 /// What the ending turn left armed, for a Stop that would otherwise rest.
@@ -324,7 +357,7 @@ mod tests {
     fn records_only_bounded_monitors_of_the_main_agent() {
         let started = |json: &str| {
             let input: HookInput = serde_json::from_str(json).unwrap();
-            started_monitor(&input, json.as_bytes())
+            started_wait(&input, json.as_bytes())
         };
         let monitor = |response: &str, agent: &str| {
             format!(
@@ -357,6 +390,48 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn records_foreground_commands_moved_to_the_background() {
+        let started = |response: &str, agent: &str| {
+            let json = format!(
+                r#"{{"session_id":"s","transcript_path":"/t/s.jsonl","hook_event_name":"PostToolUse","tool_name":"Bash"{agent},"tool_input":{{"command":"x","timeout":4000}},"tool_response":{response}}}"#
+            );
+            let input: HookInput = serde_json::from_str(&json).unwrap();
+            started_wait(&input, json.as_bytes())
+        };
+        // Payload of CLI 2.1.325 for a command that outlived its timeout.
+        assert_eq!(
+            started(
+                r#"{"stdout":"","stderr":"","interrupted":false,"isImage":false,"noOutputExpected":false,"backgroundTaskId":"bpjgjdz6e","timedOutAfterMs":4000}"#,
+                ""
+            )
+            .as_deref(),
+            Some("bpjgjdz6e")
+        );
+        assert_eq!(
+            started(
+                r#"{"stdout":"","backgroundTaskId":"b2","backgroundedByUser":true}"#,
+                ""
+            )
+            .as_deref(),
+            Some("b2")
+        );
+        // Started with run_in_background: a dev server as far as we can tell.
+        assert_eq!(
+            started(r#"{"stdout":"","backgroundTaskId":"b3"}"#, ""),
+            None
+        );
+        // A subagent's command does not resume the session.
+        assert_eq!(
+            started(
+                r#"{"backgroundTaskId":"b4","timedOutAfterMs":4000}"#,
+                r#","agent_id":"child""#
+            ),
+            None
+        );
+        assert_eq!(started(r#"{"timedOutAfterMs":4000}"#, ""), None);
     }
 
     #[test]

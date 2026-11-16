@@ -23,6 +23,7 @@ fn read(
             subagent: false,
             wakeup: false,
         },
+        |_| false,
         millis(30000).unwrap(),
     )
 }
@@ -90,6 +91,7 @@ fn explicit_wait_compaction_and_shell_states() {
                     subagent: false,
                     wakeup: false,
                 },
+                |_| false,
                 millis(86_400_000).unwrap()
             )
             .unwrap()
@@ -216,6 +218,7 @@ fn late_subagent_hook_does_not_revive_an_idle_turn() {
                     subagent: subagent_hook,
                     wakeup: false,
                 },
+                |_| false,
                 millis(30000).unwrap(),
             )
             .unwrap()
@@ -248,6 +251,7 @@ fn a_scheduled_wakeup_survives_the_idle_registry() {
                     subagent: false,
                     wakeup,
                 },
+                |_| false,
                 millis(30000).unwrap(),
             )
             .unwrap()
@@ -258,4 +262,59 @@ fn a_scheduled_wakeup_survives_the_idle_registry() {
     assert_eq!(read("shell", true), Some(AgentState::Awaiting));
     assert_eq!(read("busy", true), Some(AgentState::Active));
     assert_eq!(read("idle", false), Some(AgentState::Idle));
+}
+
+/// Sequence measured on CLI 2.1.325 for `! <long command>`: `busy` without
+/// any hook, `shell` once it is moved to the background, then `busy` when its
+/// end resumes the model.
+#[test]
+fn a_shell_started_after_the_last_hook_is_awaited() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = Registry::new(dir.path().into());
+    let asked = std::cell::Cell::new(0);
+    let read = |status: &str, published: u64, state, user_shell: bool| {
+        fs::write(dir.path().join("42.json"), fixture(status, published)).unwrap();
+        registry
+            .read(
+                PID,
+                "s",
+                millis(9000).unwrap(),
+                LastHook {
+                    state,
+                    time: millis(12000).unwrap(),
+                    subagent: false,
+                    wakeup: false,
+                },
+                |time| {
+                    assert_eq!(time, millis(published).unwrap());
+                    asked.set(asked.get() + 1);
+                    user_shell
+                },
+                millis(30000).unwrap(),
+            )
+            .unwrap()
+            .map(|(state, _)| state)
+    };
+    let (idle, awaiting) = (Some(AgentState::Idle), Some(AgentState::Awaiting));
+    assert_eq!(
+        read("busy", 20000, AgentState::Idle, true),
+        Some(AgentState::Active)
+    );
+    assert_eq!(read("shell", 20000, AgentState::Idle, true), awaiting);
+    assert_eq!(read("shell", 20000, AgentState::Idle, true), awaiting);
+    assert_eq!(read("idle", 20000, AgentState::Idle, true), idle);
+    assert_eq!(asked.get(), 2);
+    // Only shells the model started (a dev server), or a `!` command the
+    // user cancelled: nothing is awaited, and the processes are not listed
+    // again while neither the hook nor the status moves.
+    assert_eq!(read("shell", 20000, AgentState::Idle, false), idle);
+    assert_eq!(read("shell", 20000, AgentState::Idle, true), idle);
+    assert_eq!(asked.get(), 3);
+    assert_eq!(read("shell", 21000, AgentState::Idle, true), awaiting);
+    assert_eq!(asked.get(), 4);
+    // An interrupted turn: its shells may be older than the last hook's.
+    assert_eq!(read("shell", 21000, AgentState::Active, true), idle);
+    // A status older than the hook is not the session's current one.
+    assert_eq!(read("shell", 11000, AgentState::Idle, true), None);
+    assert_eq!(asked.get(), 4);
 }
