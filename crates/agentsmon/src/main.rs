@@ -1013,15 +1013,18 @@ fn open_rename(
     };
     let entity_slot = Rc::new(RefCell::new(None));
     let slot = entity_slot.clone();
+    let native_slot = Rc::new(std::cell::Cell::new(None));
+    let native = native_slot.clone();
     match cx.open_window(options, move |window, cx| {
         window.set_window_title(RENAME_WINDOW_TITLE);
+        native.set(native_view(window));
         let entity = cx.new(|cx| RenameView::new(target, provider_names, window, cx));
         *slot.borrow_mut() = Some(entity.clone());
         entity
     }) {
         Ok(handle) => {
             *state.0.rename_window.borrow_mut() = Some(handle.into());
-            configure_native_popup(RENAME_WINDOW_TITLE);
+            configure_native_popup(RENAME_WINDOW_TITLE, native_slot.get());
             let Some(entity) = entity_slot.borrow().clone() else {
                 return;
             };
@@ -1100,15 +1103,18 @@ fn open_actions_menu(
     };
     let entity_slot = Rc::new(RefCell::new(None));
     let slot = entity_slot.clone();
+    let native_slot = Rc::new(std::cell::Cell::new(None));
+    let native = native_slot.clone();
     match cx.open_window(options, move |window, cx| {
         window.set_window_title(ACTIONS_WINDOW_TITLE);
+        native.set(native_view(window));
         let entity = cx.new(|cx| ActionMenuView::new(actions, window, cx));
         *slot.borrow_mut() = Some(entity.clone());
         entity
     }) {
         Ok(handle) => {
             *state.0.actions_menu.borrow_mut() = Some(handle.into());
-            configure_native_popup(ACTIONS_WINDOW_TITLE);
+            configure_native_popup(ACTIONS_WINDOW_TITLE, native_slot.get());
             let Some(entity) = entity_slot.borrow().clone() else {
                 return;
             };
@@ -1644,19 +1650,49 @@ fn configure_native_details() {
     }
 }
 
-/// Floating, key-taking pop-up (rename prompt, actions menu) found by title.
+/// Address of the window's native view (`NSView`), used to find its
+/// `NSWindow`: the title alone also matches a pop-up GPUI is still closing.
 #[cfg(target_os = "macos")]
-fn configure_native_popup(title: &str) {
+fn native_view(window: &gpui::Window) -> Option<usize> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match HasWindowHandle::window_handle(window).ok()?.as_raw() {
+        RawWindowHandle::AppKit(handle) => Some(handle.ns_view.as_ptr() as usize),
+        _ => None,
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn native_view(_window: &gpui::Window) -> Option<usize> {
+    None
+}
+
+/// Floating, key-taking pop-up (rename prompt, actions menu). GPUI closes a
+/// removed window asynchronously, so when a pop-up replaces the previous one
+/// the old window still carries the same title here: only the new window
+/// (`view`) is made key, the others are hidden at once. Making the closing
+/// one key took the keyboard focus from the new prompt and left it stuck.
+#[cfg(target_os = "macos")]
+fn configure_native_popup(title: &str, view: Option<usize>) {
     use objc2::MainThreadMarker;
-    use objc2_app_kit::{NSApplication, NSFloatingWindowLevel, NSWindowCollectionBehavior};
+    use objc2_app_kit::{NSApplication, NSFloatingWindowLevel, NSView, NSWindowCollectionBehavior};
 
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
+    // SAFETY: the pointer comes from GPUI's raw window handle for a window
+    // opened just before, on the main thread, and still open.
+    let target = view.and_then(|view| unsafe { (*(view as *const NSView)).window() });
     let app = NSApplication::sharedApplication(mtm);
     for index in 0..app.windows().count() {
         let window = app.windows().objectAtIndex(index);
         if window.title().to_string() != title {
+            continue;
+        }
+        if target
+            .as_deref()
+            .is_some_and(|target| !std::ptr::eq(target, &*window))
+        {
+            window.orderOut(None);
             continue;
         }
         let Some(screen) = window.screen() else {
@@ -1678,7 +1714,7 @@ fn configure_native_popup(title: &str) {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn configure_native_popup(_title: &str) {}
+fn configure_native_popup(_title: &str, _view: Option<usize>) {}
 
 /// The group menu behaves like the bars: floating, on every space, and a
 /// non-activating panel so clicking a member never brings AgentsMon forward.
