@@ -55,7 +55,7 @@ Synthetic example:
 Only the names entered in AgentsMon and their keys are saved. No
 snapshot, activity state, provider-supplied title, message, PID or focus
 target goes into this file. Hidden sessions keep their separate
-file `hidden-sessions.json`. Card order stays in memory.
+file `hidden-sessions.json`, and the card order `session-order.json` (session IDs only).
 
 `AgentStore` exposes the sorted preferences through `custom_names()` and restores them
 before the first snapshot through `restore_custom_names()`. It does no I/O.

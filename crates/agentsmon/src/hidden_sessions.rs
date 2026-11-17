@@ -1,6 +1,7 @@
 //! Persist the sessions closed with the × button so a restart does not bring
 //! every dormant conversation back. Only IDs and timestamps are stored.
-//! Providers toggled off from their bar icon are kept beside them, as IDs.
+//! Providers toggled off from their bar icon are kept beside them, as IDs,
+//! and so is the bar order, as session IDs.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,6 +11,7 @@ use serde::{de::DeserializeOwned, Serialize};
 
 const FILE_NAME: &str = "hidden-sessions.json";
 const PROVIDERS_FILE_NAME: &str = "hidden-providers.json";
+const ORDER_FILE_NAME: &str = "session-order.json";
 
 pub(crate) fn path() -> Result<PathBuf> {
     data_file(FILE_NAME)
@@ -17,6 +19,10 @@ pub(crate) fn path() -> Result<PathBuf> {
 
 pub(crate) fn providers_path() -> Result<PathBuf> {
     data_file(PROVIDERS_FILE_NAME)
+}
+
+pub(crate) fn order_path() -> Result<PathBuf> {
+    data_file(ORDER_FILE_NAME)
 }
 
 fn data_file(name: &str) -> Result<PathBuf> {

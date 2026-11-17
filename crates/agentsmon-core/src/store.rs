@@ -37,6 +37,13 @@ pub struct GroupName {
 pub struct AgentStore {
     snapshots: HashMap<AgentId, AgentSnapshot>,
     order: Vec<AgentId>,
+    /// IDs from the order saved by a previous run that no snapshot has
+    /// listed yet. They keep their place in `order` while their provider
+    /// lists no session at all (e.g. a Gateway that is still connecting).
+    restored_order: HashSet<AgentId>,
+    /// Until set, providers may still be listing their sessions after a
+    /// restart, so no restored ID is dropped.
+    restored_order_settled: bool,
     hidden: HashMap<AgentId, SystemTime>,
     /// Providers toggled off from their bar icon. Unlike `hidden`, this
     /// also hides sessions that start later, until toggled back on.
@@ -48,8 +55,13 @@ pub struct AgentStore {
 impl AgentStore {
     pub fn apply_snapshot(&mut self, incoming: Vec<AgentSnapshot>) {
         let live: HashSet<_> = incoming.iter().map(|item| item.id.clone()).collect();
+        let live_providers: HashSet<_> = incoming.iter().map(|item| &item.id.provider).collect();
+        let settled = self.restored_order_settled;
+        self.restored_order
+            .retain(|id| !live.contains(id) && !(settled && live_providers.contains(&id.provider)));
         self.snapshots.retain(|id, _| live.contains(id));
-        self.order.retain(|id| live.contains(id));
+        self.order
+            .retain(|id| live.contains(id) || self.restored_order.contains(id));
         self.hidden.retain(|id, _| live.contains(id));
         // Names are user preferences, not live-session state. Keep them across
         // empty/partial provider snapshots and sessions resumed after a restart.
@@ -62,7 +74,7 @@ impl AgentStore {
             if has_new_activity {
                 self.hidden.remove(&snapshot.id);
             }
-            if !self.snapshots.contains_key(&snapshot.id) {
+            if !self.snapshots.contains_key(&snapshot.id) && !self.order.contains(&snapshot.id) {
                 self.order.push(snapshot.id.clone());
             }
             self.snapshots.insert(snapshot.id.clone(), snapshot);
@@ -152,6 +164,31 @@ impl AgentStore {
         for session in sessions {
             self.hidden.entry(session.id).or_insert(session.hidden_at);
         }
+    }
+
+    /// Bar order, including restored sessions not listed yet, for persistence.
+    pub fn order(&self) -> &[AgentId] {
+        &self.order
+    }
+
+    /// Seed the bar order saved by a previous run. Call before the first
+    /// snapshot: restored sessions take their saved place when they are
+    /// listed, and sessions that are gone drop out once `settle_restored_order`
+    /// was called and their provider lists any session. New sessions are
+    /// appended after them.
+    pub fn restore_order(&mut self, ids: impl IntoIterator<Item = AgentId>) {
+        for id in ids {
+            if !self.order.contains(&id) {
+                self.restored_order.insert(id.clone());
+                self.order.push(id);
+            }
+        }
+    }
+
+    /// End the startup grace: from the next snapshot, a restored ID drops
+    /// out once its provider lists sessions without it.
+    pub fn settle_restored_order(&mut self) {
+        self.restored_order_settled = true;
     }
 
     /// Call before the first snapshot. A currently set name takes precedence.
@@ -487,6 +524,49 @@ mod tests {
         session.last_activity = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(2);
         store.apply_snapshot(vec![session]);
         assert_eq!(store.visible().len(), 1);
+    }
+
+    #[test]
+    fn restored_order_survives_restart_and_forgets_dead_sessions() {
+        let mut original = AgentStore::default();
+        let mut gateway = item("g");
+        gateway.id.provider = "openclaw".into();
+        original.apply_snapshot(vec![item("a"), item("b"), gateway.clone(), item("dead")]);
+        original.reorder(&[gateway.id.clone()], Some(&AgentId::new("claude", "a")));
+        original.reorder(
+            &[AgentId::new("claude", "b")],
+            Some(&AgentId::new("claude", "a")),
+        );
+        let saved = original.order().to_vec();
+
+        let mut restarted = AgentStore::default();
+        restarted.restore_order(saved);
+        // Providers may list their sessions late after a restart.
+        restarted.apply_snapshot(vec![item("a")]);
+        restarted.settle_restored_order();
+        // The Gateway is not connected yet: its session keeps its place.
+        restarted.apply_snapshot(vec![item("new"), item("a"), item("b")]);
+        let ids = |store: &AgentStore| -> Vec<String> {
+            store
+                .order()
+                .iter()
+                .map(|id| id.session_id.clone())
+                .collect()
+        };
+        assert_eq!(ids(&restarted), ["g", "b", "a", "new"]);
+        let visible: Vec<_> = restarted
+            .visible()
+            .iter()
+            .map(|s| s.id.session_id.clone())
+            .collect();
+        assert_eq!(visible, ["b", "a", "new"]);
+
+        restarted.apply_snapshot(vec![item("new"), item("a"), item("b"), gateway.clone()]);
+        assert_eq!(restarted.visible()[0].id, gateway.id);
+
+        // Once listed, a session that ends is forgotten like any other.
+        restarted.apply_snapshot(vec![item("a"), item("b")]);
+        assert_eq!(ids(&restarted), ["b", "a"]);
     }
 
     #[test]

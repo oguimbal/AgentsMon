@@ -40,6 +40,9 @@ const QUIT_ACTION: &str = "app.quit";
 /// How long the pointer may be outside both a group card and its menu before
 /// the menu closes; covers the travel between the two.
 const MENU_GRACE: Duration = Duration::from_millis(300);
+/// After a restart, saved card positions of sessions not listed yet are kept
+/// this long whatever the providers return, since some list their sessions late.
+const ORDER_RESTORE_GRACE: Duration = Duration::from_secs(30);
 const WATCHED_POLL_INTERVAL: Duration = Duration::from_secs(10);
 const FALLBACK_POLL_INTERVAL: Duration = Duration::from_secs(3);
 const CHANGE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
@@ -103,6 +106,9 @@ struct AppStateInner {
     connection_window: RefCell<Option<AnyWindowHandle>>,
     /// Last hidden-session list written to disk, to skip redundant writes.
     persisted_hidden: RefCell<Vec<agentsmon_core::HiddenSession>>,
+    /// Last bar order written to disk, to skip redundant writes.
+    persisted_order: RefCell<Vec<agentsmon_core::AgentId>>,
+    started_at: Instant,
     custom_names: RefCell<custom_names::Persistence>,
     /// Newer release found by the update check, and what the bars show for it.
     update: RefCell<Option<update::Update>>,
@@ -139,7 +145,7 @@ fn main() {
         } else {
             FALLBACK_POLL_INTERVAL
         };
-        let (mut store, persisted_hidden) = restored_store();
+        let (mut store, persisted_hidden, persisted_order) = restored_store();
         let custom_names = custom_names::Persistence::new();
         store.restore_custom_names(custom_names.restored());
         let state = AppState(Rc::new(AppStateInner {
@@ -162,6 +168,8 @@ fn main() {
             connection_diagnostics: RefCell::new(connection_diagnostics::ConnectionDiagnostics::new()),
             connection_window: RefCell::new(None),
             persisted_hidden: RefCell::new(persisted_hidden),
+            persisted_order: RefCell::new(persisted_order),
+            started_at: Instant::now(),
             custom_names: RefCell::new(custom_names),
             update: RefCell::new(None),
             update_badge: std::cell::Cell::new(UpdateBadge::Hidden),
@@ -347,7 +355,13 @@ fn refresh(state: &AppState, cx: &mut App) {
         .filter(|snapshot| snapshot.state == agentsmon_core::AgentState::Active)
         .map(|snapshot| snapshot.id.clone())
         .collect();
-    state.0.store.borrow_mut().apply_snapshot(snapshots);
+    {
+        let mut store = state.0.store.borrow_mut();
+        if state.0.started_at.elapsed() >= ORDER_RESTORE_GRACE {
+            store.settle_restored_order();
+        }
+        store.apply_snapshot(snapshots);
+    }
     *state.0.provider_statuses.borrow_mut() = provider_statuses;
     for id in active_ids {
         state.0.unread.borrow_mut().remove(&id);
@@ -533,9 +547,13 @@ fn spawn_refresh_loop(cx: &mut App, state: AppState, poll_interval: Duration) {
     .detach();
 }
 
-/// Build the store with the sessions hidden during the previous run. Dead
-/// sessions drop out on the first refresh, which then rewrites the file.
-fn restored_store() -> (AgentStore, Vec<agentsmon_core::HiddenSession>) {
+/// Build the store with the sessions hidden and the bar order of the previous
+/// run. Dead sessions drop out on refresh, which then rewrites the files.
+fn restored_store() -> (
+    AgentStore,
+    Vec<agentsmon_core::HiddenSession>,
+    Vec<agentsmon_core::AgentId>,
+) {
     let hidden = match hidden_sessions::path() {
         Ok(path) => hidden_sessions::load_from(&path),
         Err(error) => {
@@ -549,7 +567,15 @@ fn restored_store() -> (AgentStore, Vec<agentsmon_core::HiddenSession>) {
         Ok(path) => store.restore_hidden_providers(hidden_sessions::load_from::<String>(&path)),
         Err(error) => tracing::warn!(%error, "hidden providers are not persisted"),
     }
-    (store, hidden)
+    let order = match hidden_sessions::order_path() {
+        Ok(path) => hidden_sessions::load_from(&path),
+        Err(error) => {
+            tracing::warn!(%error, "session order is not persisted");
+            Vec::new()
+        }
+    };
+    store.restore_order(order.iter().cloned());
+    (store, hidden, order)
 }
 
 /// Toggling is rare and explicit: save the provider list right away.
@@ -582,9 +608,24 @@ fn persist_hidden(state: &AppState) {
     }
 }
 
+/// Write the bar order when it changed since the last write.
+fn persist_order(state: &AppState) {
+    let order = state.0.store.borrow().order().to_vec();
+    if *state.0.persisted_order.borrow() == order {
+        return;
+    }
+    let result =
+        hidden_sessions::order_path().and_then(|path| hidden_sessions::save_to(&path, &order));
+    match result {
+        Ok(()) => *state.0.persisted_order.borrow_mut() = order,
+        Err(error) => tracing::warn!(%error, "cannot save session order"),
+    }
+}
+
 fn broadcast(state: &AppState, cx: &mut App) {
     state.0.local_source.publish(state);
     persist_hidden(state);
+    persist_order(state);
     state
         .0
         .custom_names

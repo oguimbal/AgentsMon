@@ -7,7 +7,7 @@ Each physical display gets the same low-profile bar in its bottom-left corner. E
 - the basename of its working directory;
 - green, orange, grey, or blue state feedback;
 - a circular context-window gauge around the state dot, on a thin ring in the provider's brand colour (Claude terracotta, Codex green, Mistral orange) so agents working on the same repository stay apart;
-- drag-and-drop ordering and a hide action that survives restarts until the session becomes active again;
+- drag-and-drop ordering kept across restarts, and a hide action that survives restarts until the session becomes active again;
 - right-click to rename a card (the prompt shows the conversation title and full path; an empty name restores the repository name);
 - right-click anywhere else on the bar for a menu with the provider actions and "Quit AgentsMon";
 - sessions sharing a working directory fold into one group card: the pill is split into equal stripes (one per member state), the indicator shows the member count ringed by provider colours, and hovering unfolds a menu of the members above the bar, each with its own details, focus, hide and rename;
@@ -144,7 +144,7 @@ While it runs, AgentsMon publishes the visible sessions (names, states, unread f
 
 | Crate | Role |
 | --- | --- |
-| `agentsmon-core` | Provider-neutral models and ordering/hiding/renaming store (hidden IDs persisted by the app) |
+| `agentsmon-core` | Provider-neutral models and ordering/hiding/renaming store (order and hidden IDs persisted by the app) |
 | `agentsmon-providers` | Provider trait, Claude/Codex/Vibe discovery, presentation assets, watchers and OS focus |
 | `agentsmon-ui` | GPUI bars, context ring, drag/drop and diagnostics |
 | `agentsmon-helper` | Claude/Codex/Vibe hook and status-line helper executable |
