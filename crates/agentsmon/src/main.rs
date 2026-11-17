@@ -350,9 +350,14 @@ fn refresh(state: &AppState, cx: &mut App) {
         })
         .map(|snapshot| snapshot.id.clone())
         .collect();
+    // A session that starts a turn is being read. Only the transition counts,
+    // so a running session marked unread by hand keeps its mark.
     let active_ids: Vec<_> = snapshots
         .iter()
-        .filter(|snapshot| snapshot.state == agentsmon_core::AgentState::Active)
+        .filter(|snapshot| {
+            snapshot.state == agentsmon_core::AgentState::Active
+                && previous.get(&snapshot.id) != Some(&agentsmon_core::AgentState::Active)
+        })
         .map(|snapshot| snapshot.id.clone())
         .collect();
     {
@@ -799,6 +804,7 @@ fn handle_event(
             open_actions_menu(state, display_id, display_bounds, *anchor_x, actions, cx);
         }
         MonitorEvent::InstallUpdate => install_update(state, cx),
+        MonitorEvent::SetUnread { ids, unread } => set_unread(ids, *unread, state, cx),
     }
 }
 
@@ -819,6 +825,7 @@ fn handle_menu_event(event: &MonitorEvent, state: &AppState, cx: &mut App) {
             open_details_beside_menu(state, agent.as_ref().clone(), cx);
         }
         MonitorEvent::HideDetails => close_details(state, cx),
+        MonitorEvent::SetUnread { ids, unread } => set_unread(ids, *unread, state, cx),
         MonitorEvent::Rename { target, anchor_x } => {
             let placement = state.0.group_menu.borrow().as_ref().map(|menu| {
                 (
@@ -1157,6 +1164,22 @@ fn focus_agent(id: &agentsmon_core::AgentId, state: &AppState, cx: &mut App) {
         tracing::warn!(code, session = %id.session_id, "focus failed");
         mark_read(id, state, cx);
     }
+}
+
+/// Manual mark from a ⌥-click or middle click. Marking never notifies.
+fn set_unread(ids: &[agentsmon_core::AgentId], unread: bool, state: &AppState, cx: &mut App) {
+    {
+        let mut marked = state.0.unread.borrow_mut();
+        for id in ids {
+            if unread {
+                marked.insert(id.clone());
+            } else {
+                marked.remove(id);
+                state.0.notifications.close(id);
+            }
+        }
+    }
+    broadcast(state, cx);
 }
 
 fn mark_read(id: &agentsmon_core::AgentId, state: &AppState, cx: &mut App) {

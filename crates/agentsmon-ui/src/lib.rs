@@ -19,9 +19,10 @@ use agentsmon_core::{
 };
 use gpui::prelude::*;
 use gpui::{
-    canvas, div, fill, img, point, px, rgb, rgba, size, AnyElement, Bounds, ContentMask, Context,
-    Corners, DragMoveEvent, Entity, EventEmitter, Focusable, Hsla, Image, ImageFormat, IntoElement,
-    MouseButton, MouseDownEvent, PathBuilder, Render, SharedString, Subscription, Window,
+    canvas, div, fill, img, point, px, rgb, rgba, size, AnyElement, Bounds, ClickEvent,
+    ContentMask, Context, Corners, DragMoveEvent, Entity, EventEmitter, Focusable, Hsla, Image,
+    ImageFormat, IntoElement, MouseButton, MouseDownEvent, PathBuilder, Render, SharedString,
+    Subscription, Window,
 };
 
 pub use text_input::key_bindings as rename_key_bindings;
@@ -98,6 +99,11 @@ pub enum MonitorEvent {
     },
     /// Click on the update arrow: download and install the announced version.
     InstallUpdate,
+    /// ⌥-click or middle click on a card: set or clear the unread mark.
+    SetUnread {
+        ids: Vec<AgentId>,
+        unread: bool,
+    },
 }
 
 /// The update arrow at the right end of every bar.
@@ -299,6 +305,7 @@ impl MonitorView {
         let id = agent.id.clone();
         let focus_id = id.clone();
         let hide_id = id.clone();
+        let toggle_id = id.clone();
         let in_menu = self.layout == Layout::Menu;
         // The menu lists sessions that share a project name, so it shows the
         // conversation title instead (see `AgentSnapshot::menu_label`).
@@ -352,8 +359,23 @@ impl MonitorView {
                     });
                 }),
             )
-            .on_click(cx.listener(move |_, _, _event, cx| {
-                cx.emit(MonitorEvent::Focus(focus_id.clone()));
+            .on_click(cx.listener(move |_, event: &ClickEvent, _, cx| {
+                if event.modifiers().alt {
+                    cx.emit(MonitorEvent::SetUnread {
+                        ids: vec![focus_id.clone()],
+                        unread: !is_unread,
+                    });
+                } else {
+                    cx.emit(MonitorEvent::Focus(focus_id.clone()));
+                }
+            }))
+            .on_aux_click(cx.listener(move |_, event: &ClickEvent, _, cx| {
+                if event.is_middle_click() {
+                    cx.emit(MonitorEvent::SetUnread {
+                        ids: vec![toggle_id.clone()],
+                        unread: !is_unread,
+                    });
+                }
             }));
         self.draggable(card, vec![id.clone()], label.clone(), cx)
             .when(is_unread, |card| card.child(unread_badge()))
@@ -400,6 +422,19 @@ impl MonitorView {
             .members
             .iter()
             .any(|member| self.unread.contains(&member.id));
+        // A marked group clears every member; otherwise its most recent one is marked.
+        let unread_toggle = if is_unread {
+            MonitorEvent::SetUnread {
+                ids: ids.clone(),
+                unread: false,
+            }
+        } else {
+            MonitorEvent::SetUnread {
+                ids: vec![focus_id.clone()],
+                unread: true,
+            }
+        };
+        let aux_unread_toggle = unread_toggle.clone();
         let hover_key = key.clone();
         let hide_key = key.clone();
         let rename_target = RenameTarget::Group(group.clone());
@@ -440,8 +475,17 @@ impl MonitorView {
                     });
                 }),
             )
-            .on_click(cx.listener(move |_, _, _event, cx| {
-                cx.emit(MonitorEvent::Focus(focus_id.clone()));
+            .on_click(cx.listener(move |_, event: &ClickEvent, _, cx| {
+                if event.modifiers().alt {
+                    cx.emit(unread_toggle.clone());
+                } else {
+                    cx.emit(MonitorEvent::Focus(focus_id.clone()));
+                }
+            }))
+            .on_aux_click(cx.listener(move |_, event: &ClickEvent, _, cx| {
+                if event.is_middle_click() {
+                    cx.emit(aux_unread_toggle.clone());
+                }
             }));
         self.draggable(card, ids, label.clone(), cx)
             .when(is_unread, |card| card.child(unread_badge()))
